@@ -1,6 +1,18 @@
 
 
-# Time & Line
+# Time & Line (Planning)
+
+A planning-focused fork of [Sabidurian’s Time & Line](https://github.com/sabidurian/timeline-gantt-view), published under the original MIT license.
+
+Adds precise date/time editing, dependency navigation, task icons, editable property colors, offscreen task navigation, and drag measurement down to seconds. Built for desktop Obsidian, with an iOS WebKit test harness.
+
+- [Setup and fork features](PLANNING.md)
+- [Developer and agent handoff](HANDOFF.md)
+- [Validation and device limitations](TESTING.md)
+
+This repository contains plugin code and synthetic test fixtures. Personal notes, vaults, exports, and migration scripts are excluded.
+
+> The original upstream overview follows. For this fork’s current behavior, installation, and verification status, use the guides above.
 
 **A set of Gantt chart and timeline views for Obsidian Bases.**
 
@@ -169,7 +181,8 @@ You're building a timeline of ancient civilizations or historical events spannin
 
 **Using the measurement tool:**
 - Press `M` to activate the measurement tool.
-- Click on one event, then another. A floating label shows the exact duration between them (e.g., "247 years, 3 months").
+- Click and drag across the timeline for a live duration, then release to keep the result. Clicking two points also works.
+- The label shows up to two nonzero units, from years down to seconds (e.g., "3 days, 2 hours" or "1 hour, 5 minutes"). Press `Escape` to exit; drag again to measure another span.
 - Useful for answering questions like "How long after the fall of Rome did Charlemagne's empire begin?"
 
 **Calendar markers:**

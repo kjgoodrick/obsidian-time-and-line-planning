@@ -1,3 +1,4 @@
+import { instantToWallMs, axisToWallMs, wallToInstant, offsetISO } from './timezone';
 /**
  * Date utilities for Sabidurian Timeline.
  * Handles parsing, formatting, and BCE date logic.
@@ -10,6 +11,8 @@ export interface SabidurianDate {
   month?: number;         // 0-11, only for CE dates at month+ precision
   day?: number;           // 1-31, only for CE dates at day+ precision
   hour?: number;          // 0-23
+  second?: number;
+  millisecond?: number;   // 0-999, preserved through scheduling and serialization
   minute?: number;        // 0-59
   isHistorical: boolean;  // true if year < 1 (BCE territory)
 }
@@ -46,7 +49,7 @@ export function maxPrecision(a: DatePrecision, b: DatePrecision): DatePrecision 
  * 4. "-500" or "501 BCE" → { year: -500, isHistorical: true }
  * 5. Numeric value → treated as year
  */
-export function parseSabidurianDate(value: unknown): SabidurianDate | null {
+export function parseSabidurianDate(value: unknown, timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone): SabidurianDate | null {
   if (value == null) return null;
 
   // Handle raw numbers directly (e.g. -500 from YAML frontmatter)
@@ -55,25 +58,13 @@ export function parseSabidurianDate(value: unknown): SabidurianDate | null {
     return { year: Math.round(value), isHistorical: value < 1 };
   }
 
-  // Handle JS Date objects (YAML auto-parses YYYY-MM-DD strings as Dates)
-  if (value instanceof Date) {
-    if (isNaN(value.getTime())) return null;
-    // Use UTC methods to avoid timezone shifts
-    const y = value.getUTCFullYear();
-    const h = value.getUTCHours();
-    const min = value.getUTCMinutes();
-    const hasTime = h !== 0 || min !== 0 || value.getUTCSeconds() !== 0;
-    const result: SabidurianDate = {
-      year: y,
-      month: value.getUTCMonth(),
-      day: value.getUTCDate(),
-      isHistorical: y < 1,
-    };
-    if (hasTime) {
-      result.hour = h;
-      if (min !== 0) result.minute = min;
-    }
-    return result;
+  // Bases DateValue exposes a Date; prefer that to its localized display string.
+  if (value instanceof Date || (typeof value === 'object' && (value as any).date instanceof Date)) {
+    const date = value instanceof Date ? value : (value as any).date;
+    if (isNaN(date.getTime())) return null;
+    const d = new Date(instantToWallMs(date.getTime(), timeZone));
+    return { year: d.getUTCFullYear(), month: d.getUTCMonth(), day: d.getUTCDate(),
+      hour: d.getUTCHours(), minute: d.getUTCMinutes(), second: d.getUTCSeconds(), millisecond: d.getUTCMilliseconds(), isHistorical: false };
   }
 
   const raw = typeof value === 'object' && value !== null && 'toString' in value
@@ -96,9 +87,17 @@ export function parseSabidurianDate(value: unknown): SabidurianDate | null {
     return { year: y, isHistorical: true };
   }
 
+  if (/[T ]\d{2}:\d{2}.*(?:Z|[+-]\d{2}:?\d{2})$/.test(raw)) {
+    const instant = Date.parse(raw);
+    if (!Number.isFinite(instant)) return null;
+    const d = new Date(instantToWallMs(instant, timeZone));
+    return { year: d.getUTCFullYear(), month: d.getUTCMonth(), day: d.getUTCDate(),
+      hour: d.getUTCHours(), minute: d.getUTCMinutes(), second: d.getUTCSeconds(), millisecond: d.getUTCMilliseconds(), isHistorical: false };
+  }
+
   // Try ISO 8601 with time: "2025-03-27T14:30:00", "2025-03-27T14:30", "2025-03-27T14"
-  // Minutes/seconds optional; trailing TZ info ignored.
-  const isoTimeMatch = raw.match(/^(\d{1,4})-(\d{2})-(\d{2})[T ](\d{2})(?::(\d{2}))?(?::(\d{2}))?/);
+  // Minutes/seconds optional; explicit timezone suffixes are handled above.
+  const isoTimeMatch = raw.match(/^(\d{1,4})-(\d{2})-(\d{2})[T ](\d{2})(?::(\d{2}))?(?::(\d{2})(?:\.(\d{1,3}))?)?$/);
   if (isoTimeMatch) {
     const y = parseInt(isoTimeMatch[1], 10);
     const result: SabidurianDate = {
@@ -111,6 +110,8 @@ export function parseSabidurianDate(value: unknown): SabidurianDate | null {
     if (isoTimeMatch[5] != null) {
       result.minute = parseInt(isoTimeMatch[5], 10);
     }
+    result.second = Number(isoTimeMatch[6] ?? 0);
+    result.millisecond = Number((isoTimeMatch[7] ?? '').padEnd(3, '0'));
     return result;
   }
 
@@ -154,7 +155,7 @@ export function parseSabidurianDate(value: unknown): SabidurianDate | null {
 export function sabidurianDateToDate(cd: SabidurianDate): Date | null {
   if (cd.isHistorical) return null;
   // Use setFullYear to avoid JS treating years 0-99 as 1900-1999
-  const d = new Date(2000, cd.month ?? 0, cd.day ?? 1, cd.hour ?? 0, cd.minute ?? 0);
+  const d = new Date(2000, cd.month ?? 0, cd.day ?? 1, cd.hour ?? 0, cd.minute ?? 0, cd.second ?? 0, cd.millisecond ?? 0);
   d.setFullYear(cd.year);
   return d;
 }
@@ -195,7 +196,7 @@ export function sabidurianDateToYear(cd: SabidurianDate): number {
     cd.day ?? 1,
     cd.hour ?? 0,
     cd.minute ?? 0,
-  );
+  ) + (cd.second ?? 0) * 1000 + (cd.millisecond ?? 0);
   return cd.year + (valMs - startMs) / (endMs - startMs);
 }
 
@@ -234,11 +235,20 @@ export function formatSabidurianDate(cd: SabidurianDate): string {
     return `${monthNames[cd.month]} ${cd.year}`;
   }
   if (cd.hour != null) {
-    const hh = String(cd.hour).padStart(2, '0');
-    const mm = String(cd.minute ?? 0).padStart(2, '0');
-    return `${monthNames[cd.month]} ${cd.day}, ${cd.year} ${hh}:${mm}`;
+    return `${monthNames[cd.month]} ${cd.day}, ${cd.year} · ${formatClock(cd)}`;
   }
   return `${monthNames[cd.month]} ${cd.day}, ${cd.year}`;
+}
+
+export function formatClock(cd: SabidurianDate): string {
+  const hour = cd.hour ?? 0, minute = cd.minute ?? 0, second = cd.second ?? 0;
+  return `${hour % 12 || 12}${minute || second ? ':' + String(minute).padStart(2, '0') : ''}${second ? ':' + String(second).padStart(2, '0') : ''} ${hour < 12 ? 'AM' : 'PM'}`;
+}
+
+export function formatDateRange(start: SabidurianDate, end: SabidurianDate | null): string {
+  if (!end) return formatSabidurianDate(start);
+  const sameDay = start.year === end.year && start.month === end.month && start.day === end.day;
+  return `${formatSabidurianDate(start)} – ${sameDay && end.hour != null ? formatClock(end) : formatSabidurianDate(end)}`;
 }
 
 /**
@@ -257,7 +267,9 @@ export function formatDateForYAML(cd: SabidurianDate): string | number {
   if (cd.hour == null) return `${y}-${m}-${d}`;
   const hh = String(cd.hour).padStart(2, '0');
   const mm = String(cd.minute ?? 0).padStart(2, '0');
-  return `${y}-${m}-${d}T${hh}:${mm}`;
+  const seconds = cd.second ?? 0, milliseconds = cd.millisecond ?? 0;
+  return `${y}-${m}-${d}T${hh}:${mm}` + (seconds || milliseconds ? `:${String(seconds).padStart(2, '0')}` : '') +
+    (milliseconds ? `.${String(milliseconds).padStart(3, '0')}` : '');
 }
 
 /**
@@ -276,9 +288,13 @@ export function formatDateForYAML(cd: SabidurianDate): string | number {
 export function yearToYAMLString(
   fractionalYear: number,
   precision: DatePrecision = 'day',
+  timeZone?: string,
 ): string | number {
   if (fractionalYear < 1) {
     return Math.round(fractionalYear);
+  }
+  if (timeZone && (precision === 'minute' || precision === 'hour')) {
+    return offsetISO(wallToInstant(axisToWallMs(fractionalYear), timeZone), timeZone);
   }
   const year = Math.floor(fractionalYear);
   const frac = fractionalYear - year;
@@ -292,8 +308,8 @@ export function yearToYAMLString(
     const HOUR_MS = 60 * 60 * 1000;
     targetMs = Math.round(targetMs / HOUR_MS) * HOUR_MS;
   } else if (precision === 'minute') {
-    const QH_MS = 15 * 60 * 1000;
-    targetMs = Math.round(targetMs / QH_MS) * QH_MS;
+    // The axis is accurate to milliseconds; remove only sub-millisecond float noise.
+    targetMs = Math.round(targetMs);
   } else if (precision === 'day') {
     const DAY_MS = 24 * 60 * 60 * 1000;
     targetMs = Math.round(targetMs / DAY_MS) * DAY_MS;
@@ -308,7 +324,10 @@ export function yearToYAMLString(
   if (precision === 'day') return `${yStr}-${mStr}-${dStr}`;
   const hStr = String(d.getUTCHours()).padStart(2, '0');
   const minStr = String(d.getUTCMinutes()).padStart(2, '0');
-  return `${yStr}-${mStr}-${dStr}T${hStr}:${minStr}`;
+  const sec = d.getUTCSeconds();
+  const ms = d.getUTCMilliseconds();
+  return `${yStr}-${mStr}-${dStr}T${hStr}:${minStr}` + (sec || ms ? `:${String(sec).padStart(2, '0')}` : '') +
+    (ms ? `.${String(ms).padStart(3, '0')}` : '');
 }
 
 /**

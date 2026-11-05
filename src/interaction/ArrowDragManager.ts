@@ -18,6 +18,9 @@ import { BAR_HEIGHT } from '../model/LayoutEngine';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 export class ArrowDragManager {
+  dependencyProperty = 'blocked-by';
+  private locked = false;
+  connect: ((from: SabidurianEntry, to: SabidurianEntry) => Promise<void>) | null = null;
   private app: App;
   private svg: SVGSVGElement;
   private entries: SabidurianEntry[] = [];
@@ -59,6 +62,7 @@ export class ArrowDragManager {
       if (!entry) continue;
 
       handle.addEventListener('mousedown', (e) => {
+        if (this.locked) return;
         if ((e as MouseEvent).button !== 0) return;
         e.preventDefault();
         e.stopPropagation();
@@ -107,7 +111,7 @@ export class ArrowDragManager {
     }
   };
 
-  private onMouseUp = (e: MouseEvent): void => {
+  private onMouseUp = async (e: MouseEvent): Promise<void> => {
     if (!this.isDragging) return;
 
     const svgRect = this.svg.getBoundingClientRect();
@@ -115,11 +119,15 @@ export class ArrowDragManager {
     const localY = e.clientY - svgRect.top;
 
     const target = this.findBarAtPoint(localX, localY);
-    if (target && target !== this.sourceEntry && this.sourceEntry) {
-      this.createDependency(this.sourceEntry, target);
-    }
-
+    const source = this.sourceEntry;
     this.resetDrag();
+    if (target && target !== source && source) {
+      try {
+        await this.createDependency(source, target);
+      } catch (error) {
+        new Notice(`Failed to add dependency: ${String(error)}`);
+      }
+    }
   };
 
   /**
@@ -163,22 +171,24 @@ export class ArrowDragManager {
    * Writes `[[source.basename]]` into target's `blocked-by` frontmatter array.
    */
   private async createDependency(source: SabidurianEntry, target: SabidurianEntry): Promise<void> {
-    const wikilink = `[[${source.file.basename}]]`;
+    if (this.locked || target.locked) return;
+    if (this.connect) { await this.connect(source, target); return; }
+    const wikilink = `[[${source.file.path.replace(/\.md$/, '')}]]`;
 
     await this.app.fileManager.processFrontMatter(target.file, (fm) => {
-      let deps: any[] = fm['blocked-by'] ?? [];
+      let deps: any[] = fm[this.dependencyProperty] ?? [];
       if (!Array.isArray(deps)) deps = [];
 
       // Check for duplicates
       const exists = deps.some((d: any) => {
         const str = String(d);
         const cleaned = str.replace(/^\[\[/, '').replace(/\]\]$/, '');
-        return cleaned === source.file.basename;
+        return cleaned === source.file.path.replace(/\.md$/, '');
       });
 
       if (!exists) {
         deps.push(wikilink);
-        fm['blocked-by'] = deps;
+        fm[this.dependencyProperty] = deps;
       }
     });
 
@@ -199,6 +209,11 @@ export class ArrowDragManager {
 
   setConnectCompleteCallback(cb: () => void): void {
     this.onConnectComplete = cb;
+  }
+
+  setLocked(locked: boolean): void {
+    this.locked = locked;
+    if (locked) this.resetDrag();
   }
 
   destroy(): void {

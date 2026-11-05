@@ -12,6 +12,8 @@ export interface ColumnBoundary {
   label: string;
   /** Coarser label for the top tier header (e.g., "2025" above month columns). */
   tierLabel?: string;
+  /** Persistent context for fine-grained hours/minutes while horizontally scrolling. */
+  contextLabel?: string;
   /** Whether this is the first column in a new tier group. */
   isTierStart?: boolean;
 }
@@ -38,7 +40,7 @@ export interface TimeScale {
    */
   writePrecision?: 'year' | 'month' | 'day' | 'hour' | 'minute';
   /** Generate column boundaries for the given year range. */
-  getColumnBoundaries(start: number, end: number): ColumnBoundary[];
+  getColumnBoundaries(start: number, end: number, tickMinutes?: number): ColumnBoundary[];
   /** Snap a fractional year to the nearest unit boundary. */
   snapToUnit(year: number): number;
 }

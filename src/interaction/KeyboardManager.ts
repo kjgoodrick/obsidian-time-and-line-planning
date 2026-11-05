@@ -26,6 +26,7 @@ type ChangeScaleCallback = (scaleId: string) => void;
 type DeleteEntryCallback = (entry: SabidurianEntry) => void;
 type RefreshCallback = () => void;
 type MeasureToggleCallback = () => void;
+type OpenEntryCallback = (entry: SabidurianEntry) => void;
 
 export class KeyboardManager {
   private app: App;
@@ -43,8 +44,18 @@ export class KeyboardManager {
   private onDeleteEntry: DeleteEntryCallback | null = null;
   private onRefresh: RefreshCallback | null = null;
   private onMeasureToggle: MeasureToggleCallback | null = null;
+  private onOpenEntry: OpenEntryCallback | null = null;
 
   private boundKeyHandler: (e: KeyboardEvent) => void;
+  private focusFrame: number | null = null;
+  private boundMouseHandler = (e: MouseEvent): void => {
+    if (this.isInteractiveTarget(e.target)) return;
+    if (this.focusFrame !== null) cancelAnimationFrame(this.focusFrame);
+    this.focusFrame = requestAnimationFrame(() => {
+      this.focusFrame = null;
+      this.container.focus();
+    });
+  };
 
   constructor(
     container: HTMLElement,
@@ -77,18 +88,20 @@ export class KeyboardManager {
     // Also use capture phase so we get the event even if a child stops propagation.
     // IMPORTANT: Skip focus-steal when clicking form elements (select, input, etc.)
     // or their focus will be yanked away, closing native dropdowns.
-    this.container.addEventListener('mousedown', (e) => {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === 'SELECT' || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'OPTION') return;
-      // Defer focus slightly so it doesn't interfere with drag initiation
-      requestAnimationFrame(() => this.container.focus());
-    }, true);
+    this.container.addEventListener('mousedown', this.boundMouseHandler, true);
+  }
+
+  /** Leave native and custom controls in charge of their own activation and focus. */
+  private isInteractiveTarget(target: EventTarget | null): boolean {
+    return !!(target as Element | null)?.closest?.(
+      'button, a, input, select, textarea, option, [role="button"], [role="link"], [contenteditable]:not([contenteditable="false"])',
+    );
   }
 
   private onKeyDown(e: KeyboardEvent): void {
-    // Don't capture if focus is on an input/select/textarea
-    const tag = (e.target as HTMLElement).tagName;
-    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    // Toolbar buttons, SVG task/group controls and editable fields must retain Tab,
+    // Enter and Space. A handled child event must not open a second selected note.
+    if (e.defaultPrevented || this.isInteractiveTarget(e.target)) return;
 
     switch (e.key) {
       case 'ArrowRight':
@@ -232,6 +245,7 @@ export class KeyboardManager {
   private openSelected(): void {
     const entry = this.selectionManager.getSelectedEntry();
     if (!entry) return;
+    if (this.onOpenEntry) { this.onOpenEntry(entry); return; }
     this.app.workspace.getLeaf(false).openFile(entry.file);
   }
 
@@ -287,12 +301,21 @@ export class KeyboardManager {
     this.onMeasureToggle = cb;
   }
 
+  /** Timeline can open its inspector; Sequence retains the original note action. */
+  setOpenEntryCallback(cb: OpenEntryCallback): void {
+    this.onOpenEntry = cb;
+  }
+
   destroy(): void {
+    if (this.focusFrame !== null) cancelAnimationFrame(this.focusFrame);
+    this.focusFrame = null;
+    this.container.removeEventListener('mousedown', this.boundMouseHandler, true);
     this.container.removeEventListener('keydown', this.boundKeyHandler);
     this.onScrollToToday = null;
     this.onChangeScale = null;
     this.onDeleteEntry = null;
     this.onRefresh = null;
     this.onMeasureToggle = null;
+    this.onOpenEntry = null;
   }
 }

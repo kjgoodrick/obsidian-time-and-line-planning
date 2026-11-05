@@ -8,6 +8,7 @@
 
 import type { SabidurianEntry } from './SabidurianEntry';
 import { ROW_HEIGHT } from './LayoutEngine';
+import { labelWidth } from './labels';
 
 /** Padding in pixels beyond the viewport to pre-render (prevents pop-in). */
 const H_BUFFER = 200;
@@ -40,7 +41,7 @@ export class ViewportCuller {
     return entries.filter((entry) => {
       // Horizontal check: bar or point must overlap [left, right]
       const entryLeft = entry.x;
-      const entryRight = entry.isPoint ? entry.x + 40 : entry.x + entry.width;
+      const entryRight = entry.x + Math.max(entry.width, labelWidth(entry.displayLabel ?? entry.label) + (entry.icon?.kind === 'image' ? 20 : 0) + (entry.isPoint ? 30 : 8));
       if (entryRight < left || entryLeft > right) return false;
 
       // Vertical check: row must overlap [top, bottom]

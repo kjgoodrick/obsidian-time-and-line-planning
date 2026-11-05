@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Time &amp; Line · WebKit test</title>
+  <link rel="stylesheet" href="host.css">
+  <link rel="stylesheet" href="plugin.css">
+</head>
+<body class="theme-light is-mobile">
+  <header class="harness-header">
+    <div><strong>Cooking plan</strong><small>Real plugin UI · synthetic test data</small></div>
+    <select id="view" aria-label="Saved view"><option>Timeline</option><option>Oven</option><option>Chef</option><option>Month</option></select>
+    <button id="checks" title="Run WebKit checks">Checks</button>
+    <button id="theme" class="harness-icon" title="Switch light or dark theme" aria-label="Switch light or dark theme">◐</button>
+    <button id="reset" class="harness-icon" title="Reset synthetic fixture" aria-label="Reset synthetic fixture">↺</button>
+  </header>
+  <div id="status" role="status">Loading the production timeline…</div>
+  <main id="host"></main>
+  <script src="harness.js"></script>
+</body>
+</html>

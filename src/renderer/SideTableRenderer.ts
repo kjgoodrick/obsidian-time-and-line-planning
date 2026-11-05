@@ -7,6 +7,8 @@ import type { App, TFile } from 'obsidian';
 import type { SabidurianEntry, SabidurianGroup } from '../model/SabidurianEntry';
 import { ROW_HEIGHT, BAR_HEIGHT, Y_OFFSET, GROUP_HEADER_HEIGHT } from '../model/LayoutEngine';
 import { formatSabidurianDate } from '../utils/dateUtils';
+import { getPropertyTone, type PropertyColors } from '../utils/colorUtils';
+import { prependTaskImage } from '../model/taskIcons';
 
 export interface TableColumn {
   key: string;        // Property display name
@@ -18,6 +20,7 @@ const MIN_TABLE_WIDTH = 120;
 const MAX_TABLE_WIDTH = 500;
 
 export class SideTableRenderer {
+  propertyColors: PropertyColors = {};
   private wrapperEl: HTMLElement;
   private tableEl: HTMLElement;
   private headerEl: HTMLElement;
@@ -93,6 +96,7 @@ export class SideTableRenderer {
         cls: 'sabidurian-st-link',
         text: entry.label,
       });
+      prependTaskImage(titleLink, entry.icon);
       titleLink.addEventListener('click', (e) => {
         e.preventDefault();
         this.app.workspace.getLeaf(false).openFile(entry.file);
@@ -114,7 +118,7 @@ export class SideTableRenderer {
       for (const col of columns) {
         const val = entry.properties[col.key] ?? '';
         const cell = row.createDiv({ cls: 'sabidurian-st-cell' });
-        cell.setText(val === 'null' ? '' : val);
+        this.renderValue(cell, col, val);
       }
 
       // Row hover sync
@@ -188,6 +192,7 @@ export class SideTableRenderer {
           cls: 'sabidurian-st-link',
           text: entry.label,
         });
+        prependTaskImage(titleLink, entry.icon);
         titleLink.addEventListener('click', (e) => {
           e.preventDefault();
           this.app.workspace.getLeaf(false).openFile(entry.file);
@@ -207,7 +212,7 @@ export class SideTableRenderer {
         for (const col of columns) {
           const val = entry.properties[col.key] ?? '';
           const cell = row.createDiv({ cls: 'sabidurian-st-cell' });
-          cell.setText(val === 'null' ? '' : val);
+          this.renderValue(cell, col, val);
         }
 
         // Row hover sync
@@ -224,6 +229,13 @@ export class SideTableRenderer {
   }
 
   /** Set a callback for group collapse/expand toggle. */
+  private renderValue(cell: HTMLElement, col: TableColumn, value: string): void {
+    if (!value || value === 'null') return;
+    const tone = getPropertyTone(col.propId, value, this.propertyColors);
+    const content = cell.createSpan({ text: value });
+    if (tone) content.dataset.sabidurianColor = tone;
+  }
+
   setGroupToggleCallback(cb: (groupName: string) => void): void {
     this.onGroupToggle = cb;
   }

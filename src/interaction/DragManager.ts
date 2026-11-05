@@ -1,3 +1,4 @@
+import { Scheduling } from '../model/Scheduling';
 /**
  * DragManager — Handles drag-to-move, drag-to-resize, and drag-to-create.
  *
@@ -42,6 +43,11 @@ interface DragContext {
 }
 
 export class DragManager {
+  private locked = false;
+  private detachListeners: (() => void)[] = [];
+  scheduling: Scheduling | null = null;
+  persist: ((entry: SabidurianEntry, start: number, end: number) => Promise<void>) | null = null;
+
   private app: App;
   private svg: SVGSVGElement;
   private axis: NumericAxis;
@@ -63,7 +69,7 @@ export class DragManager {
 
   // Callbacks
   private onDragComplete: (() => void) | null = null;
-  private onCreateEntry: ((startYear: number, endYear: number) => void) | null = null;
+  private onCreateEntry: ((startYear: number, endYear: number) => void | Promise<void>) | null = null;
 
   // Undo support
   private lastUndo: { file: TFile; prop: string; oldVal: string | number; newVal: string | number }[] | null = null;
@@ -122,10 +128,10 @@ export class DragManager {
       const entry = entries[idx];
 
       // Change cursor near edges
-      group.addEventListener('mousemove', (e) => {
+      this.listen(group, 'mousemove', (e) => {
         if (this.ctx.state !== 'idle') return;
-        if (entry.locked) {
-          (group as SVGGElement).style.cursor = 'default';
+        if (this.locked || entry.locked) {
+          (group as SVGGElement).style.cursor = this.locked ? 'pointer' : 'default';
           return;
         }
         const cursor = this.getCursorType(entry, e as MouseEvent);
@@ -133,30 +139,20 @@ export class DragManager {
       });
 
       // Mousedown: start potential drag
-      group.addEventListener('mousedown', (e) => {
-        if (entry.locked) return; // Locked entries cannot be dragged
+      this.listen(group, 'mousedown', (e) => {
+        if ((e as any).sourceCapabilities?.firesTouchEvents) return;
+        if (this.locked || entry.locked) return; // Locked entries cannot be dragged
         if ((e as MouseEvent).button !== 0) return; // left click only
         e.preventDefault();
         e.stopPropagation();
         this.beginPendingDrag(entry, e as MouseEvent);
       });
-
-      // Suppress resize cursor near right edge of ongoing bars
-      if (entry.isOngoing) {
-        group.addEventListener('mousemove', (e) => {
-          if (this.ctx.state !== 'idle') return;
-          const rect = (e.currentTarget as Element).getBoundingClientRect();
-          const localX = (e as MouseEvent).clientX - rect.left;
-          // Only allow grab (move), never col-resize on right edge
-          if (localX > entry.width - EDGE_THRESHOLD) {
-            (group as SVGGElement).style.cursor = 'grab';
-          }
-        });
-      }
     });
 
     // Empty area: drag-to-create
-    this.svg.addEventListener('mousedown', (e) => {
+    this.listen(this.svg, 'mousedown', (e) => {
+      if (this.locked) return;
+      if ((e as any).sourceCapabilities?.firesTouchEvents) return;
       if (this.ctx.state !== 'idle') return;
       // Only if click is on SVG background (not on a bar or group header)
       if ((e.target as Element).closest('.sabidurian-bar-group')) return;
@@ -170,30 +166,26 @@ export class DragManager {
     // Global mouse handlers
     document.addEventListener('mousemove', this.onMouseMove);
     document.addEventListener('mouseup', this.onMouseUp);
+    window.addEventListener('blur', this.cancelDrag);
   }
 
   private getCursorType(entry: SabidurianEntry, e: MouseEvent): string {
-    if (entry.isPoint) return 'grab';
-    const rect = (e.currentTarget as Element).getBoundingClientRect();
-    const localX = e.clientX - rect.left;
-    const barWidth = entry.width;
-    if (localX < EDGE_THRESHOLD) return 'col-resize';
-    if (localX > barWidth - EDGE_THRESHOLD && barWidth > EDGE_THRESHOLD * 2) return 'col-resize';
-    return 'grab';
+    return this.getDragType(entry, e) === 'drag-move' ? 'grab' : 'col-resize';
+  }
+
+  /** Use the real bar bounds, excluding overflow labels and fuzzy extensions. */
+  private getDragType(entry: SabidurianEntry, e: MouseEvent): DragState {
+    const barLocalX = e.clientX - this.svg.getBoundingClientRect().left - entry.x;
+    if (!entry.isPoint && entry.width > EDGE_THRESHOLD * 3 && barLocalX >= 0 && barLocalX <= entry.width) {
+      if (barLocalX < EDGE_THRESHOLD) return 'drag-resize-start';
+      if (barLocalX > entry.width - EDGE_THRESHOLD && !entry.isOngoing) return 'drag-resize-end';
+      // Ongoing bars: right edge resize suppressed — end is always "today"
+    }
+    return 'drag-move';
   }
 
   private beginPendingDrag(entry: SabidurianEntry, e: MouseEvent): void {
-    const svgRect = this.svg.getBoundingClientRect();
-    const localX = e.clientX - svgRect.left;
-
-    // Determine drag type from cursor position relative to bar
-    const barLocalX = localX - entry.x;
-    let pendingType: DragState = 'drag-move';
-    if (!entry.isPoint) {
-      if (barLocalX < EDGE_THRESHOLD) pendingType = 'drag-resize-start';
-      else if (barLocalX > entry.width - EDGE_THRESHOLD && !entry.isOngoing) pendingType = 'drag-resize-end';
-      // Ongoing bars: right edge resize suppressed — end is always "today"
-    }
+    const pendingType = this.getDragType(entry, e);
 
     this.ctx = {
       state: 'pending',
@@ -251,7 +243,7 @@ export class DragManager {
     const localX = e.clientX - svgRect.left;
     const currentYear = this.axis.pixelToYear(localX);
 
-    switch (this.ctx.state) {
+    try { switch (this.ctx.state) {
       case 'drag-move':
         this.handleDragMove(currentYear, dx);
         break;
@@ -266,6 +258,7 @@ export class DragManager {
         break;
     }
 
+    } catch (error) { new Notice(String(error)); this.resetDrag(); return; }
     // Update date label
     this.updateDateLabel(e);
   };
@@ -280,9 +273,9 @@ export class DragManager {
     const entry = this.ctx.entry;
 
     if (state === 'drag-create') {
-      this.finishCreate();
+      void this.finishCreate().catch(error => new Notice(String(error)));
     } else if (entry && (state === 'drag-move' || state === 'drag-resize-start' || state === 'drag-resize-end')) {
-      this.finishEntryDrag(entry);
+      void this.finishEntryDrag(entry).catch(error => new Notice(String(error)));
     }
 
     // Suppress the click event that follows mouseup after a real drag.
@@ -312,8 +305,9 @@ export class DragManager {
     const yearDelta = this.axis.pixelToYear(this.axis.yearToPixel(this.ctx.originalStartYear) + dx) - this.ctx.originalStartYear;
     const duration = this.ctx.originalEndYear - this.ctx.originalStartYear;
 
-    const newStart = this.scale.snapToUnit(this.ctx.originalStartYear + yearDelta);
-    const newEnd = newStart + duration;
+    const moved = this.scheduling?.edit('move', { start: this.ctx.originalStartYear, end: this.ctx.originalEndYear }, this.ctx.originalStartYear + yearDelta);
+    const newStart = moved?.start ?? this.scale.snapToUnit(this.ctx.originalStartYear + yearDelta);
+    const newEnd = moved?.end ?? newStart + duration;
 
     // Update ghost position
     if (this.ctx.ghostEl) {
@@ -329,8 +323,8 @@ export class DragManager {
   }
 
   private handleResizeStart(currentYear: number): void {
-    const snapped = this.scale.snapToUnit(currentYear);
-    const maxStart = this.ctx.originalEndYear - MIN_BAR_YEARS;
+    const snapped = this.scheduling?.snap(currentYear) ?? this.scale.snapToUnit(currentYear);
+    const maxStart = this.scheduling ? this.scheduling.edit('resize-start', { start: this.ctx.originalStartYear, end: this.ctx.originalEndYear }, currentYear).start : this.ctx.originalEndYear - MIN_BAR_YEARS;
     const newStart = Math.min(snapped, maxStart);
 
     if (this.ctx.ghostEl) {
@@ -345,8 +339,8 @@ export class DragManager {
   }
 
   private handleResizeEnd(currentYear: number): void {
-    const snapped = this.scale.snapToUnit(currentYear);
-    const minEnd = this.ctx.originalStartYear + MIN_BAR_YEARS;
+    const snapped = this.scheduling?.snap(currentYear) ?? this.scale.snapToUnit(currentYear);
+    const minEnd = this.scheduling ? this.scheduling.edit('resize-end', { start: this.ctx.originalStartYear, end: this.ctx.originalEndYear }, currentYear).end : this.ctx.originalStartYear + MIN_BAR_YEARS;
     const newEnd = Math.max(snapped, minEnd);
 
     if (this.ctx.ghostEl) {
@@ -360,9 +354,10 @@ export class DragManager {
   }
 
   private handleCreateDrag(currentYear: number): void {
-    const snapped = this.scale.snapToUnit(currentYear);
-    const start = Math.min(this.ctx.originalStartYear, snapped);
-    const end = Math.max(this.ctx.originalStartYear, snapped);
+    const snapped = this.scheduling?.snap(currentYear) ?? this.scale.snapToUnit(currentYear);
+    const created = this.scheduling?.edit('create', { start: this.ctx.originalStartYear, end: this.ctx.originalEndYear }, currentYear);
+    const start = created?.start ?? Math.min(this.ctx.originalStartYear, snapped);
+    const end = created?.end ?? Math.max(this.ctx.originalStartYear, snapped);
 
     if (this.ctx.ghostEl) {
       const x = this.axis.yearToPixel(start);
@@ -379,8 +374,9 @@ export class DragManager {
     const newStart = (this.ctx as any)._newStart as number;
     const newEnd = (this.ctx as any)._newEnd as number;
 
-    if (Math.abs(newStart - this.ctx.originalStartYear) < 0.0001 &&
-        Math.abs(newEnd - this.ctx.originalEndYear) < 0.0001) {
+    if (!Number.isFinite(newStart) || !Number.isFinite(newEnd)) return;
+    if (Math.abs(newStart - this.ctx.originalStartYear) < 1e-11 &&
+        Math.abs(newEnd - this.ctx.originalEndYear) < 1e-11) {
       return; // No change
     }
 
@@ -422,6 +418,11 @@ export class DragManager {
       return;
     }
 
+    if (this.persist) {
+      await this.persist(entry, newStart, newEnd);
+      this.onDragComplete?.();
+      return;
+    }
     // ── Timeline mode: write date strings ──
     const startPrecision = this.precisionForEntry(entry, 'start');
     const endPrecision = this.precisionForEntry(entry, 'end');
@@ -460,9 +461,10 @@ export class DragManager {
     const newStart = (this.ctx as any)._newStart as number;
     const newEnd = (this.ctx as any)._newEnd as number;
 
-    if (Math.abs(newEnd - newStart) < MIN_BAR_YEARS) return; // Too small
+    if (!Number.isFinite(newStart) || !Number.isFinite(newEnd)) return;
+    if (!this.scheduling && Math.abs(newEnd - newStart) < MIN_BAR_YEARS) return; // Too small
 
-    this.onCreateEntry?.(newStart, newEnd);
+    await this.onCreateEntry?.(newStart, newEnd);
   }
 
   private createGhost(x: number, y: number, width: number): void {
@@ -564,7 +566,7 @@ export class DragManager {
   }
 
   /** Set callback for drag-to-create. */
-  setCreateCallback(cb: (startYear: number, endYear: number) => void): void {
+  setCreateCallback(cb: (startYear: number, endYear: number) => void | Promise<void>): void {
     this.onCreateEntry = cb;
   }
 
@@ -582,7 +584,23 @@ export class DragManager {
     this._sequenceMode = opts;
   }
 
+  private cancelDrag = (): void => { this.resetDrag(); };
+
+  setLocked(locked: boolean): void {
+    this.locked = locked;
+    if (locked) this.resetDrag();
+    this.svg.querySelectorAll<SVGElement>('.sabidurian-bar-group').forEach(group => { group.style.cursor = locked ? 'pointer' : ''; });
+  }
+
+  private listen(target: Element, type: string, handler: (e: MouseEvent) => void): void {
+    target.addEventListener(type, handler as EventListener);
+    this.detachListeners.push(() => target.removeEventListener(type, handler as EventListener));
+  }
+
   destroy(): void {
+    for (const detach of this.detachListeners.splice(0)) detach();
+    this.resetDrag();
+    window.removeEventListener('blur', this.cancelDrag);
     document.removeEventListener('mousemove', this.onMouseMove);
     document.removeEventListener('mouseup', this.onMouseUp);
     this.removeGhost();

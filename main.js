@@ -27,10 +27,803 @@ __export(main_exports, {
   default: () => SabidurianPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian9 = require("obsidian");
+
+// src/model/EditHistory.ts
+var EditHistory = class {
+  constructor(process) {
+    this.process = process;
+    this.stack = [];
+    this.queue = Promise.resolve();
+  }
+  enqueue(run) {
+    const next = this.queue.then(run);
+    this.queue = next.catch(() => {
+    });
+    return next;
+  }
+  patch(file, values, expected) {
+    return this.enqueue(async () => {
+      const before = {}, after = {};
+      await this.process(file, (fm) => {
+        if (expected) for (const key of Object.keys(expected)) {
+          if (JSON.stringify(fm[key]) !== JSON.stringify(expected[key])) throw new Error("Task changed since it was opened. Reopen it before saving.");
+        }
+        for (const key of Object.keys(values)) {
+          before[key] = fm[key] === void 0 ? void 0 : JSON.parse(JSON.stringify(fm[key]));
+          after[key] = values[key];
+          if (values[key] === void 0) delete fm[key];
+          else fm[key] = values[key];
+        }
+      });
+      if (JSON.stringify(before) !== JSON.stringify(after)) this.stack.push({ file, before, after });
+      if (this.stack.length > 100) this.stack.shift();
+    });
+  }
+  recordCreation(file, content, read, trash) {
+    this.stack.push({ file, before: {}, after: {}, undoCreation: async () => {
+      if (await read(file) !== content) throw new Error("Cannot undo creation: the new task was modified.");
+      await trash(file);
+    } });
+  }
+  get canUndo() {
+    return this.stack.length > 0;
+  }
+  undo() {
+    return this.enqueue(async () => {
+      const edit = this.stack[this.stack.length - 1];
+      if (!edit) return false;
+      if (edit.undoCreation) {
+        await edit.undoCreation();
+        this.stack.pop();
+        return true;
+      }
+      await this.process(edit.file, (fm) => {
+        for (const key of Object.keys(edit.after)) {
+          if (JSON.stringify(fm[key]) !== JSON.stringify(edit.after[key])) throw new Error("Cannot undo: this task has changed since the edit.");
+        }
+        for (const key of Object.keys(edit.before)) {
+          if (edit.before[key] === void 0) delete fm[key];
+          else fm[key] = edit.before[key];
+        }
+      });
+      this.stack.pop();
+      return true;
+    });
+  }
+};
+
+// src/main.ts
+var import_obsidian11 = require("obsidian");
+
+// src/utils/timezone.ts
+function utcMs(year, month = 0, day = 1, hour = 0, minute = 0, second = 0) {
+  const d = /* @__PURE__ */ new Date(0);
+  d.setUTCFullYear(year, month, day);
+  d.setUTCHours(hour, minute, second, 0);
+  return d.getTime();
+}
+function axisToWallMs(axis) {
+  const y = Math.floor(axis);
+  return Math.round(utcMs(y) + (axis - y) * (utcMs(y + 1) - utcMs(y)));
+}
+function wallMsToAxis(ms) {
+  const y = new Date(ms).getUTCFullYear();
+  return y + (ms - utcMs(y)) / (utcMs(y + 1) - utcMs(y));
+}
+function instantToWallMs(ms, zone) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: zone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date(ms));
+  const p = {};
+  for (const part of parts) if (part.type !== "literal") p[part.type] = Number(part.value);
+  return utcMs(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) + (ms % 1e3 + 1e3) % 1e3;
+}
+function wallToInstant(ms, zone, preferredOffset) {
+  const offsets = /* @__PURE__ */ new Set();
+  for (const hours of [-36, -12, 0, 12, 36]) {
+    const probe = ms + hours * 36e5;
+    offsets.add(instantToWallMs(probe, zone) - probe);
+  }
+  const candidates = [...offsets].map((offset) => ms - offset).filter((instant) => instantToWallMs(instant, zone) === ms);
+  if (candidates.length === 1) return candidates[0];
+  if (preferredOffset != null) {
+    const preferred = candidates.find((instant) => ms - instant === preferredOffset);
+    if (preferred != null) return preferred;
+  }
+  throw new Error(candidates.length ? "Ambiguous daylight-saving time; enter an explicit UTC offset." : "This local time does not exist because of daylight saving time.");
+}
+function offsetISO(instant, zone) {
+  const wall = instantToWallMs(instant, zone);
+  const offsetMinutes = Math.round((wall - instant) / 6e4);
+  const sign = offsetMinutes < 0 ? "-" : "+";
+  const abs = Math.abs(offsetMinutes);
+  const offset = `${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
+  return new Date(wall).toISOString().slice(0, -1).replace(/\.000$/, "") + offset;
+}
+function parseExactTime(value, zone) {
+  var _a;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|([+-])(\d{2}):(\d{2}))?$/);
+  if (!match)
+    throw new Error("Enter YYYY-MM-DDTHH:mm, optionally with an offset.");
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map((part) => Number(part != null ? part : 0));
+  const milliseconds = Number(((_a = match[7]) != null ? _a : "").padEnd(3, "0"));
+  const wall = utcMs(year, month - 1, day, hour, minute, second) + milliseconds;
+  const civil = new Date(wall);
+  if (year < 1 || civil.getUTCFullYear() !== year || civil.getUTCMonth() !== month - 1 || civil.getUTCDate() !== day || civil.getUTCHours() !== hour || civil.getUTCMinutes() !== minute || civil.getUTCSeconds() !== second)
+    throw new Error("Invalid calendar date.");
+  if (match[8] === "Z") return wall;
+  if (match[9]) {
+    const offsetHour = Number(match[10]), offsetMinute = Number(match[11]);
+    if (offsetHour > 23 || offsetMinute > 59) throw new Error("Invalid UTC offset.");
+    const offset = (offsetHour * 60 + offsetMinute) * 6e4 * (match[9] === "+" ? 1 : -1);
+    return wall - offset;
+  }
+  return wallToInstant(wall, zone);
+}
+
+// src/model/Scheduling.ts
+var Scheduling = class {
+  constructor(snapMinutes = 5, timeZone = "UTC") {
+    this.snapMinutes = snapMinutes;
+    this.timeZone = timeZone;
+    if (!Number.isFinite(snapMinutes) || snapMinutes < 1) throw new Error("Snap must be at least one minute.");
+    new Intl.DateTimeFormat("en", { timeZone }).format();
+  }
+  validate(start, end) {
+    const s = parseExactTime(start, this.timeZone), e = parseExactTime(end, this.timeZone);
+    if (e <= s) throw new Error("End must be after start.");
+    return { s, e };
+  }
+  nudge(start, end, minutes) {
+    const { s, e } = this.validate(start, end);
+    return { start: offsetISO(s + minutes * 6e4, this.timeZone), end: offsetISO(e + minutes * 6e4, this.timeZone) };
+  }
+  snap(axis) {
+    const unit2 = this.snapMinutes * 6e4;
+    return wallMsToAxis(Math.round(axisToWallMs(axis) / unit2) * unit2);
+  }
+  changed(a, b) {
+    return Number.isFinite(a) && Number.isFinite(b) && Math.abs(axisToWallMs(a) - axisToWallMs(b)) >= 1;
+  }
+  edit(action, original, target) {
+    const start = axisToWallMs(original.start), end = axisToWallMs(original.end);
+    const snapped = axisToWallMs(this.snap(target));
+    const minimum = this.snapMinutes * 6e4;
+    if (action === "create") {
+      const anchor = axisToWallMs(this.snap(original.start));
+      return { start: wallMsToAxis(Math.min(anchor, snapped)), end: wallMsToAxis(Math.max(Math.min(anchor, snapped) + minimum, anchor, snapped)) };
+    }
+    if (action === "move") {
+      const delta = Math.round((axisToWallMs(target) - start) / minimum) * minimum;
+      const duration = wallToInstant(end, this.timeZone) - wallToInstant(start, this.timeZone);
+      const newInstant = wallToInstant(start + delta, this.timeZone);
+      return { start: wallMsToAxis(start + delta), end: wallMsToAxis(instantToWallMs(newInstant + duration, this.timeZone)) };
+    }
+    const s = action === "resize-start" ? Math.min(snapped, end - minimum) : start;
+    const e = action === "resize-end" ? Math.max(snapped, start + minimum) : end;
+    wallToInstant(s, this.timeZone);
+    wallToInstant(e, this.timeZone);
+    return { start: wallMsToAxis(s), end: wallMsToAxis(e) };
+  }
+};
+
+// src/model/labels.ts
+function fullLabel(label, properties, order) {
+  return [label, ...order.map((key) => properties[key]).filter((value) => value && value !== "null")].join(" \xB7 ");
+}
+function labelWidth(text) {
+  return Array.from(text).length * 8 + 20;
+}
+function dependencyLinks(value) {
+  if (value == null) return [];
+  if (Array.isArray(value)) return [...new Set(value.flatMap(dependencyLinks))];
+  const text = String(value);
+  const matches = [...text.matchAll(/\[\[([^\]]+)\]\]/g)];
+  return [...new Set(matches.length ? matches.map((m) => m[1].split("|")[0].split("#")[0]) : [text.trim()].filter(Boolean))];
+}
+
+// src/model/taskIcons.ts
+function resolveTaskIcon(value, app, sourcePath) {
+  if (typeof value !== "string" || !value.trim()) return;
+  const text = value.trim();
+  const link = text.match(/^!?\[\[([^\]|]+)(?:\|[^\]]*)?\]\]$/);
+  if (link) {
+    if (!/\.(png|jpe?g|gif|webp|avif)$/i.test(link[1]) || /(?:^[a-z]+:|^\/\/)/i.test(link[1])) return;
+    const file = app.metadataCache.getFirstLinkpathDest(link[1], sourcePath);
+    if (file) return { kind: "image", url: app.vault.getResourcePath(file) };
+    return;
+  }
+  if (text.length <= 32 && /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(text) && !/[<>:/]/.test(text))
+    return { kind: "emoji", value: text };
+}
+function iconLabel(label, icon) {
+  return (icon == null ? void 0 : icon.kind) === "emoji" && !label.trimStart().startsWith(icon.value) ? `${icon.value} ${label}` : label;
+}
+function prependTaskImage(element, icon) {
+  if ((icon == null ? void 0 : icon.kind) !== "image") return;
+  const image = element.ownerDocument.createElement("img");
+  image.className = "sabidurian-task-icon";
+  image.src = icon.url;
+  image.alt = "";
+  image.draggable = false;
+  element.prepend(image);
+}
+
+// src/interaction/TaskInspector.ts
+var import_obsidian = require("obsidian");
+
+// src/utils/dateUtils.ts
+var PRECISION_ORDER = {
+  year: 0,
+  month: 1,
+  day: 2,
+  hour: 3,
+  minute: 4
+};
+function getDatePrecision(cd) {
+  if (cd.minute != null) return "minute";
+  if (cd.hour != null) return "hour";
+  if (cd.day != null) return "day";
+  if (cd.month != null) return "month";
+  return "year";
+}
+function maxPrecision(a, b) {
+  return PRECISION_ORDER[a] >= PRECISION_ORDER[b] ? a : b;
+}
+function parseSabidurianDate(value, timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone) {
+  var _a, _b;
+  if (value == null) return null;
+  if (typeof value === "number") {
+    if (!isFinite(value)) return null;
+    return { year: Math.round(value), isHistorical: value < 1 };
+  }
+  if (value instanceof Date || typeof value === "object" && value.date instanceof Date) {
+    const date = value instanceof Date ? value : value.date;
+    if (isNaN(date.getTime())) return null;
+    const d = new Date(instantToWallMs(date.getTime(), timeZone));
+    return {
+      year: d.getUTCFullYear(),
+      month: d.getUTCMonth(),
+      day: d.getUTCDate(),
+      hour: d.getUTCHours(),
+      minute: d.getUTCMinutes(),
+      second: d.getUTCSeconds(),
+      millisecond: d.getUTCMilliseconds(),
+      isHistorical: false
+    };
+  }
+  const raw = typeof value === "object" && value !== null && "toString" in value ? value.toString() : String(value);
+  if (!raw || raw === "null" || raw === "undefined") return null;
+  const bceMatch = raw.match(/^(\d+)\s*BC(?:E)?$/i);
+  if (bceMatch) {
+    const bceYear = parseInt(bceMatch[1], 10);
+    return { year: -(bceYear - 1), isHistorical: true };
+  }
+  const negMatch = raw.match(/^-(\d+)$/);
+  if (negMatch) {
+    const y = -parseInt(negMatch[1], 10);
+    return { year: y, isHistorical: true };
+  }
+  if (/[T ]\d{2}:\d{2}.*(?:Z|[+-]\d{2}:?\d{2})$/.test(raw)) {
+    const instant = Date.parse(raw);
+    if (!Number.isFinite(instant)) return null;
+    const d = new Date(instantToWallMs(instant, timeZone));
+    return {
+      year: d.getUTCFullYear(),
+      month: d.getUTCMonth(),
+      day: d.getUTCDate(),
+      hour: d.getUTCHours(),
+      minute: d.getUTCMinutes(),
+      second: d.getUTCSeconds(),
+      millisecond: d.getUTCMilliseconds(),
+      isHistorical: false
+    };
+  }
+  const isoTimeMatch = raw.match(/^(\d{1,4})-(\d{2})-(\d{2})[T ](\d{2})(?::(\d{2}))?(?::(\d{2})(?:\.(\d{1,3}))?)?$/);
+  if (isoTimeMatch) {
+    const y = parseInt(isoTimeMatch[1], 10);
+    const result = {
+      year: y,
+      month: parseInt(isoTimeMatch[2], 10) - 1,
+      day: parseInt(isoTimeMatch[3], 10),
+      hour: parseInt(isoTimeMatch[4], 10),
+      isHistorical: false
+    };
+    if (isoTimeMatch[5] != null) {
+      result.minute = parseInt(isoTimeMatch[5], 10);
+    }
+    result.second = Number((_a = isoTimeMatch[6]) != null ? _a : 0);
+    result.millisecond = Number(((_b = isoTimeMatch[7]) != null ? _b : "").padEnd(3, "0"));
+    return result;
+  }
+  const isoDateMatch = raw.match(/^(\d{1,4})-(\d{2})-(\d{2})$/);
+  if (isoDateMatch) {
+    const y = parseInt(isoDateMatch[1], 10);
+    return {
+      year: y,
+      month: parseInt(isoDateMatch[2], 10) - 1,
+      day: parseInt(isoDateMatch[3], 10),
+      isHistorical: false
+    };
+  }
+  const ymMatch = raw.match(/^(\d{1,4})-(\d{2})$/);
+  if (ymMatch) {
+    const y = parseInt(ymMatch[1], 10);
+    return {
+      year: y,
+      month: parseInt(ymMatch[2], 10) - 1,
+      isHistorical: false
+    };
+  }
+  const yearMatch = raw.match(/^(\d{1,4})$/);
+  if (yearMatch) {
+    const y = parseInt(yearMatch[1], 10);
+    return { year: y, isHistorical: y < 1 };
+  }
+  return null;
+}
+function ymdToUtcMs(year, month, day, hour = 0, minute = 0) {
+  if (year >= 100) {
+    return Date.UTC(year, month, day, hour, minute);
+  }
+  const d = new Date(Date.UTC(2e3, month, day, hour, minute));
+  d.setUTCFullYear(year);
+  return d.getTime();
+}
+function sabidurianDateToYear(cd) {
+  var _a, _b, _c, _d, _e;
+  if (cd.isHistorical || cd.month == null) {
+    return cd.year;
+  }
+  const startMs = ymdToUtcMs(cd.year, 0, 1);
+  const endMs = ymdToUtcMs(cd.year + 1, 0, 1);
+  const valMs = ymdToUtcMs(
+    cd.year,
+    cd.month,
+    (_a = cd.day) != null ? _a : 1,
+    (_b = cd.hour) != null ? _b : 0,
+    (_c = cd.minute) != null ? _c : 0
+  ) + ((_d = cd.second) != null ? _d : 0) * 1e3 + ((_e = cd.millisecond) != null ? _e : 0);
+  return cd.year + (valMs - startMs) / (endMs - startMs);
+}
+function formatYear(year) {
+  if (year <= 0) {
+    return `${1 - year} BCE`;
+  }
+  if (year < 100) {
+    return `${year} CE`;
+  }
+  return `${year}`;
+}
+function formatSabidurianDate(cd) {
+  if (cd.isHistorical) {
+    return formatYear(cd.year);
+  }
+  if (cd.month == null) {
+    return `${cd.year}`;
+  }
+  const monthNames = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec"
+  ];
+  if (cd.day == null) {
+    return `${monthNames[cd.month]} ${cd.year}`;
+  }
+  if (cd.hour != null) {
+    return `${monthNames[cd.month]} ${cd.day}, ${cd.year} \xB7 ${formatClock(cd)}`;
+  }
+  return `${monthNames[cd.month]} ${cd.day}, ${cd.year}`;
+}
+function formatClock(cd) {
+  var _a, _b, _c;
+  const hour = (_a = cd.hour) != null ? _a : 0, minute = (_b = cd.minute) != null ? _b : 0, second = (_c = cd.second) != null ? _c : 0;
+  return `${hour % 12 || 12}${minute || second ? ":" + String(minute).padStart(2, "0") : ""}${second ? ":" + String(second).padStart(2, "0") : ""} ${hour < 12 ? "AM" : "PM"}`;
+}
+function formatDateRange(start, end) {
+  if (!end) return formatSabidurianDate(start);
+  const sameDay = start.year === end.year && start.month === end.month && start.day === end.day;
+  return `${formatSabidurianDate(start)} \u2013 ${sameDay && end.hour != null ? formatClock(end) : formatSabidurianDate(end)}`;
+}
+function yearToYAMLString(fractionalYear, precision = "day", timeZone) {
+  if (fractionalYear < 1) {
+    return Math.round(fractionalYear);
+  }
+  if (timeZone && (precision === "minute" || precision === "hour")) {
+    return offsetISO(wallToInstant(axisToWallMs(fractionalYear), timeZone), timeZone);
+  }
+  const year = Math.floor(fractionalYear);
+  const frac = fractionalYear - year;
+  if (precision === "year") return String(year).padStart(4, "0");
+  const startMs = ymdToUtcMs(year, 0, 1);
+  const endMs = ymdToUtcMs(year + 1, 0, 1);
+  let targetMs = startMs + frac * (endMs - startMs);
+  if (precision === "hour") {
+    const HOUR_MS = 60 * 60 * 1e3;
+    targetMs = Math.round(targetMs / HOUR_MS) * HOUR_MS;
+  } else if (precision === "minute") {
+    targetMs = Math.round(targetMs);
+  } else if (precision === "day") {
+    const DAY_MS = 24 * 60 * 60 * 1e3;
+    targetMs = Math.round(targetMs / DAY_MS) * DAY_MS;
+  }
+  const d = new Date(targetMs);
+  const yr = d.getUTCFullYear();
+  const yStr = String(yr).padStart(4, "0");
+  const mStr = String(d.getUTCMonth() + 1).padStart(2, "0");
+  if (precision === "month") return `${yStr}-${mStr}`;
+  const dStr = String(d.getUTCDate()).padStart(2, "0");
+  if (precision === "day") return `${yStr}-${mStr}-${dStr}`;
+  const hStr = String(d.getUTCHours()).padStart(2, "0");
+  const minStr = String(d.getUTCMinutes()).padStart(2, "0");
+  const sec = d.getUTCSeconds();
+  const ms = d.getUTCMilliseconds();
+  return `${yStr}-${mStr}-${dStr}T${hStr}:${minStr}` + (sec || ms ? `:${String(sec).padStart(2, "0")}` : "") + (ms ? `.${String(ms).padStart(3, "0")}` : "");
+}
+
+// src/interaction/TaskInspector.ts
+function displayDate(value, zone) {
+  const parsed = parseSabidurianDate(value, zone);
+  return parsed ? formatSabidurianDate(parsed) : String(value != null ? value : "");
+}
+var TaskPicker = class extends import_obsidian.FuzzySuggestModal {
+  constructor(app, files, fields, choose) {
+    super(app);
+    this.files = files;
+    this.fields = fields;
+    this.choose = choose;
+    this.setPlaceholder("Find a task by name, dish or date");
+  }
+  getItems() {
+    return this.files;
+  }
+  getItemText(file) {
+    var _a, _b, _c;
+    const fm = (_b = (_a = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a.frontmatter) != null ? _b : {};
+    return [iconLabel(String((_c = fm[this.fields.label]) != null ? _c : file.basename), resolveTaskIcon(fm.icon, this.app, file.path)), fm.Dish, displayDate(fm[this.fields.start], this.fields.zone)].filter(Boolean).join(" \xB7 ");
+  }
+  renderSuggestion(match, element) {
+    var _a;
+    super.renderSuggestion(match, element);
+    const fm = (_a = this.app.metadataCache.getFileCache(match.item)) == null ? void 0 : _a.frontmatter;
+    prependTaskImage(element, resolveTaskIcon(fm == null ? void 0 : fm.icon, this.app, match.item.path));
+  }
+  onChooseItem(file) {
+    this.choose(file);
+  }
+};
+var TaskInspector = class _TaskInspector extends import_obsidian.Modal {
+  constructor(app, file, fields, history, locked, refresh, unlock, displayLabel, navigate) {
+    super(app);
+    this.file = file;
+    this.fields = fields;
+    this.history = history;
+    this.locked = locked;
+    this.refresh = refresh;
+    this.unlock = unlock;
+    this.displayLabel = displayLabel;
+    this.navigate = navigate;
+  }
+  onOpen() {
+    var _a, _b, _c, _d, _e, _f, _g;
+    const { contentEl: el } = this;
+    el.addClass("sabidurian-inspector");
+    const fm = (_b = (_a = this.app.metadataCache.getFileCache(this.file)) == null ? void 0 : _a.frontmatter) != null ? _b : {};
+    const f = this.fields;
+    const scheduling = new Scheduling(5, f.zone);
+    const original = { [f.start]: fm[f.start], [f.end]: fm[f.end], [f.dependencies]: fm[f.dependencies] };
+    let start = String((_c = fm[f.start]) != null ? _c : ""), end = String((_d = fm[f.end]) != null ? _d : "");
+    const originalStart = start, originalEnd = end;
+    let deps = dependencyLinks(fm[f.dependencies]);
+    const resolve = (path) => this.app.metadataCache.getFirstLinkpathDest(path, this.file.path);
+    const dependencyKeys = (paths) => JSON.stringify([...new Set(paths.map((path) => {
+      var _a2, _b2;
+      return (_b2 = (_a2 = resolve(path)) == null ? void 0 : _a2.path) != null ? _b2 : path.replace(/\.md$/, "");
+    }))].sort());
+    const originalDependencies = dependencyKeys(deps);
+    const noteLocked = String(fm[f.locked || "locked"]) === "true";
+    const disabled = this.locked || noteLocked;
+    const icon = resolveTaskIcon(fm.icon, this.app, this.file.path);
+    const heading = el.createEl("h2", { text: iconLabel((_g = this.displayLabel) != null ? _g : String((_f = (_e = fm[f.label]) != null ? _e : fm.Step) != null ? _f : this.file.basename), icon) });
+    prependTaskImage(heading, icon);
+    el.createEl("p", { text: [fm.Dish, fm["Active Chef"], fm["Oven Temp"] ? `${fm["Oven Temp"]}\xB0 oven` : null].filter(Boolean).join(" \xB7 ") });
+    el.createEl("p", { text: f.zone, cls: "sabidurian-editor-zone" });
+    const expectedInputs = /* @__PURE__ */ new Map();
+    const timeFields = el.createDiv({ cls: "sabidurian-time-fields" });
+    const makeTime = (label, value) => {
+      const wrap = timeFields.createEl("label", { text: label });
+      const input = wrap.createEl("input", { type: "datetime-local" });
+      input.step = "1";
+      try {
+        input.value = offsetISO(parseExactTime(value, f.zone), f.zone).slice(0, 19);
+      } catch (e) {
+        input.value = value.slice(0, 19);
+      }
+      input.disabled = disabled;
+      expectedInputs.set(input, input.value);
+      return input;
+    };
+    const startInput = makeTime("Start", start), endInput = makeTime("End", end);
+    const advanced = el.createEl("details", { cls: "sabidurian-advanced-time" });
+    advanced.createEl("summary", { text: "Advanced time format" });
+    const isoToggle = advanced.createEl("button", { text: "Use ISO times with UTC offsets" });
+    const error = el.createEl("p", { cls: "sabidurian-editor-error", attr: { role: "alert" } });
+    const draftTimes = () => ({
+      start: startInput.value === expectedInputs.get(startInput) ? start : offsetISO(parseExactTime(startInput.value, f.zone), f.zone),
+      end: endInput.value === expectedInputs.get(endInput) ? end : offsetISO(parseExactTime(endInput.value, f.zone), f.zone)
+    });
+    const sameTime = (a, b) => {
+      if (a === b) return true;
+      try {
+        return parseExactTime(a, f.zone) === parseExactTime(b, f.zone);
+      } catch (e) {
+        return false;
+      }
+    };
+    const isDirty = () => {
+      try {
+        const draft = draftTimes();
+        return !sameTime(draft.start, originalStart) || !sameTime(draft.end, originalEnd) || dependencyKeys(deps) !== originalDependencies;
+      } catch (e) {
+        return true;
+      }
+    };
+    let closeButton;
+    const navigationMessage = "Save or discard your changes before leaving this task.";
+    const updateCloseLabel = () => {
+      var _a2, _b2, _c2, _d2;
+      const dirty = isDirty(), label = dirty ? "Discard changes" : "Close";
+      closeButton == null ? void 0 : closeButton.setText(label);
+      const closeIcon = (_d2 = (_a2 = this.modalEl) == null ? void 0 : _a2.querySelector(":scope > .modal-close-button")) != null ? _d2 : (_c2 = (_b2 = this.modalEl) == null ? void 0 : _b2.querySelector(":scope > .modal-header-button > svg.lucide-x")) == null ? void 0 : _c2.parentElement;
+      closeIcon == null ? void 0 : closeIcon.setAttribute("aria-label", label);
+      closeIcon == null ? void 0 : closeIcon.setAttribute("title", label);
+      if (!dirty && error.textContent === navigationMessage) error.setText("");
+    };
+    startInput.addEventListener("input", updateCloseLabel);
+    endInput.addEventListener("input", updateCloseLabel);
+    startInput.addEventListener("change", updateCloseLabel);
+    endInput.addEventListener("change", updateCloseLabel);
+    const showTimes = () => {
+      startInput.value = startInput.type === "text" ? start : start.slice(0, 19);
+      endInput.value = endInput.type === "text" ? end : end.slice(0, 19);
+      expectedInputs.set(startInput, startInput.value);
+      expectedInputs.set(endInput, endInput.value);
+      updateCloseLabel();
+    };
+    isoToggle.onclick = () => {
+      try {
+        const draft = draftTimes();
+        start = draft.start;
+        end = draft.end;
+        startInput.type = endInput.type = "text";
+        showTimes();
+        isoToggle.disabled = true;
+        error.setText("");
+      } catch (e) {
+        error.setText(String(e));
+        updateCloseLabel();
+      }
+    };
+    const readInputs = () => {
+      const draft = draftTimes();
+      scheduling.validate(draft.start, draft.end);
+      return draft;
+    };
+    const leaveFor = async (target, useTaskNavigation) => {
+      if (isDirty()) {
+        updateCloseLabel();
+        error.setText(navigationMessage);
+        return;
+      }
+      try {
+        if (useTaskNavigation && this.navigate) this.navigate(target);
+        else await this.app.workspace.getLeaf(false).openFile(target);
+        this.close();
+      } catch (e) {
+        error.setText(String(e));
+      }
+    };
+    const nudgeRow = el.createDiv({ cls: "sabidurian-editor-actions" });
+    for (const delta of [-5, 5]) {
+      const button = nudgeRow.createEl("button", { text: `${delta > 0 ? "+" : "\u2212"}5 min` });
+      button.disabled = disabled;
+      button.onclick = () => {
+        try {
+          const draft = readInputs();
+          const moved = scheduling.nudge(draft.start, draft.end, delta);
+          start = moved.start;
+          end = moved.end;
+          showTimes();
+          error.setText("");
+        } catch (e) {
+          error.setText(String(e));
+          updateCloseLabel();
+        }
+      };
+    }
+    el.createEl("h3", { text: "Blocked by" });
+    const list = el.createDiv();
+    const taskText = (path) => {
+      var _a2, _b2, _c2, _d2;
+      const file = resolve(path), meta = file ? (_a2 = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a2.frontmatter : null;
+      return [iconLabel(String((_c2 = (_b2 = meta == null ? void 0 : meta[f.label]) != null ? _b2 : file == null ? void 0 : file.basename) != null ? _c2 : path), resolveTaskIcon(meta == null ? void 0 : meta.icon, this.app, (_d2 = file == null ? void 0 : file.path) != null ? _d2 : this.file.path)), meta == null ? void 0 : meta.Dish, (meta == null ? void 0 : meta[f.start]) ? displayDate(meta[f.start], f.zone) : null].filter(Boolean).join(" \xB7 ");
+    };
+    const taskLink = (row, path, target = resolve(path)) => {
+      var _a2, _b2;
+      const text = taskText(path);
+      if (!target) {
+        row.createSpan({ text, attr: { title: "Task unavailable" } });
+        return;
+      }
+      const link = row.createEl("button", { text, cls: "sabidurian-dependency-link", attr: { "aria-label": `Open ${text}` } });
+      prependTaskImage(link, resolveTaskIcon((_b2 = (_a2 = this.app.metadataCache.getFileCache(target)) == null ? void 0 : _a2.frontmatter) == null ? void 0 : _b2.icon, this.app, target.path));
+      link.onclick = () => leaveFor(target, true);
+    };
+    const renderDeps = () => {
+      list.empty();
+      if (!deps.length) list.createEl("p", { text: "None" });
+      for (const path of deps) {
+        const row = list.createDiv({ cls: "sabidurian-dependency-row" });
+        taskLink(row, path);
+        const remove = row.createEl("button", { text: "Remove", attr: { "aria-label": `Remove ${taskText(path)}` } });
+        remove.disabled = disabled;
+        remove.onclick = () => {
+          deps = deps.filter((d) => d !== path);
+          renderDeps();
+          updateCloseLabel();
+        };
+      }
+    };
+    renderDeps();
+    const files = this.app.vault.getMarkdownFiles().filter((file) => {
+      var _a2;
+      const meta = (_a2 = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a2.frontmatter;
+      return (meta == null ? void 0 : meta[f.start]) != null && (!f.folder || file.path.startsWith(f.folder + "/"));
+    });
+    const add = el.createEl("button", { text: "Add predecessor\u2026" });
+    add.disabled = disabled;
+    add.onclick = () => new TaskPicker(this.app, files.filter((file) => file.path !== this.file.path && !deps.some((d) => {
+      var _a2;
+      return ((_a2 = resolve(d)) == null ? void 0 : _a2.path) === file.path;
+    })), f, (file) => {
+      deps.push(file.path.replace(/\.md$/, ""));
+      renderDeps();
+      updateCloseLabel();
+    }).open();
+    el.createEl("h3", { text: "Blocking" });
+    const blocking = files.filter((file) => {
+      var _a2, _b2;
+      return dependencyLinks((_b2 = (_a2 = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a2.frontmatter) == null ? void 0 : _b2[f.dependencies]).some((d) => {
+        var _a3;
+        return ((_a3 = this.app.metadataCache.getFirstLinkpathDest(d, file.path)) == null ? void 0 : _a3.path) === this.file.path;
+      });
+    });
+    if (!blocking.length) el.createEl("p", { text: "None" });
+    for (const file of blocking) taskLink(el.createDiv({ cls: "sabidurian-dependency-row" }), file.path, file);
+    const actions = el.createDiv({ cls: "sabidurian-editor-actions sabidurian-editor-footer" });
+    if (this.locked && !noteLocked) {
+      const edit = actions.createEl("button", { text: "Unlock view to edit" });
+      edit.onclick = () => {
+        this.unlock();
+        this.close();
+        new _TaskInspector(this.app, this.file, f, this.history, false, this.refresh, this.unlock, this.displayLabel, this.navigate).open();
+      };
+    }
+    const save = actions.createEl("button", { text: "Save", cls: "mod-cta" });
+    save.disabled = disabled;
+    save.onclick = async () => {
+      try {
+        const draft = readInputs();
+        save.disabled = true;
+        const patch = {};
+        if (!sameTime(draft.start, originalStart)) patch[f.start] = draft.start;
+        if (!sameTime(draft.end, originalEnd)) patch[f.end] = draft.end;
+        if (dependencyKeys(deps) !== originalDependencies) patch[f.dependencies] = deps.map((path) => `[[${path}]]`);
+        await this.history.patch(this.file, patch, original);
+        this.close();
+        this.refresh();
+      } catch (e) {
+        error.setText(String(e));
+        save.disabled = false;
+      }
+    };
+    const open = actions.createEl("button", { text: "Open note" });
+    open.onclick = () => leaveFor(this.file, false);
+    closeButton = actions.createEl("button", { text: "Close" });
+    closeButton.onclick = () => this.close();
+    updateCloseLabel();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var NewTaskModal = class extends import_obsidian.Modal {
+  constructor(app, zone, initialStart, create, options = { dishes: [], chefs: [], ovens: [] }) {
+    super(app);
+    this.zone = zone;
+    this.initialStart = initialStart;
+    this.create = create;
+    this.options = options;
+  }
+  onOpen() {
+    var _a, _b;
+    const el = this.contentEl;
+    el.addClass("sabidurian-inspector");
+    el.createEl("h2", { text: "New task" });
+    const name = el.createEl("label", { text: "Step" }).createEl("input", { type: "text", placeholder: "What needs doing?", attr: { "aria-label": "Step" } });
+    el.createEl("p", { text: this.zone, cls: "sabidurian-editor-zone" });
+    const times = el.createDiv({ cls: "sabidurian-time-fields" });
+    const start = times.createEl("label", { text: "Start" }).createEl("input", { type: "datetime-local", attr: { "aria-label": "Start" } });
+    start.value = this.initialStart.slice(0, 16);
+    const end = times.createEl("label", { text: "End" }).createEl("input", { type: "datetime-local", attr: { "aria-label": "End" } });
+    end.value = ((_a = this.options.initialEnd) != null ? _a : offsetISO(parseExactTime(this.initialStart, this.zone) + 3e5, this.zone)).slice(0, 16);
+    const propertiesEl = el.createDiv({ cls: "sabidurian-time-fields" });
+    const selects = /* @__PURE__ */ new Map();
+    const required = new Set((_b = this.options.required) != null ? _b : []);
+    const addSelect = (property, label, choices) => {
+      const field = propertiesEl.createEl("label", { text: required.has(property) ? `${label} (required)` : label });
+      const select = field.createEl("select", { attr: { "aria-label": property } });
+      select.required = required.has(property);
+      select.createEl("option", { value: "", text: "Unassigned" });
+      for (const value of new Set(choices.filter((value2) => value2.trim()))) {
+        select.createEl("option", { value, text: value });
+      }
+      select.value = "";
+      selects.set(property, select);
+    };
+    addSelect("Dish", "Dish", this.options.dishes);
+    addSelect("Active Chef", "Chef", this.options.chefs);
+    addSelect("Oven Temp", "Oven temp", this.options.ovens);
+    const error = el.createEl("p", { cls: "sabidurian-editor-error", attr: { role: "alert" } });
+    const actions = el.createDiv({ cls: "sabidurian-editor-actions sabidurian-editor-footer" });
+    const save = actions.createEl("button", { text: "Create", cls: "mod-cta" });
+    const cancel = actions.createEl("button", { text: "Cancel" });
+    cancel.onclick = () => this.close();
+    save.onclick = async () => {
+      var _a2;
+      try {
+        const s = parseExactTime(start.value, this.zone), e = parseExactTime(end.value, this.zone);
+        if (!name.value.trim() || e <= s) throw new Error("Enter a name and an end after start.");
+        const properties = {};
+        for (const [property, select] of selects) if (select.value) properties[property] = select.value;
+        for (const property of required) {
+          if (!properties[property]) {
+            (_a2 = selects.get(property)) == null ? void 0 : _a2.focus();
+            throw new Error(`Choose ${property === "Active Chef" ? "a chef" : property === "Oven Temp" ? "an oven temperature" : property.toLowerCase()} to keep this task visible in this view.`);
+          }
+        }
+        save.disabled = true;
+        await this.create(name.value.trim(), offsetISO(s, this.zone), offsetISO(e, this.zone), properties);
+        this.close();
+      } catch (e) {
+        error.setText(String(e));
+        save.disabled = false;
+      }
+    };
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 
 // src/SabidurianView.ts
-var import_obsidian6 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/scale/NumericAxis.ts
 var NumericAxis = class {
@@ -90,11 +883,18 @@ function autoSelectScale(yearRange, pixelWidth) {
 // src/renderer/HeaderRenderer.ts
 var HeaderRenderer = class {
   constructor(parentEl) {
+    this.columns = [];
+    this.axis = null;
+    this.contextEl = parentEl.createDiv({ cls: "sabidurian-header-context" });
     this.headerEl = parentEl.createDiv({ cls: "sabidurian-header-bar" });
     this.topTierEl = this.headerEl.createDiv({ cls: "sabidurian-header-tier sabidurian-header-tier-top" });
     this.bottomTierEl = this.headerEl.createDiv({ cls: "sabidurian-header-tier sabidurian-header-tier-bottom" });
   }
   render(columns, axis) {
+    this.columns = columns;
+    this.axis = axis;
+    this.contextEl.style.display = columns.some((c) => c.contextLabel) ? "" : "none";
+    this.updateContext(0);
     this.topTierEl.empty();
     this.bottomTierEl.empty();
     let currentTierLabel = "";
@@ -132,6 +932,13 @@ var HeaderRenderer = class {
   }
   setScrollLeft(px) {
     this.headerEl.scrollLeft = px;
+    this.updateContext(px);
+  }
+  updateContext(px) {
+    var _a, _b, _c, _d;
+    if (!this.axis) return;
+    const value = this.axis.pixelToYear(px);
+    this.contextEl.setText((_d = (_c = (_a = this.columns.find((c) => c.start <= value && c.end > value)) == null ? void 0 : _a.contextLabel) != null ? _c : (_b = this.columns[0]) == null ? void 0 : _b.contextLabel) != null ? _d : "");
   }
 };
 
@@ -139,7 +946,8 @@ var HeaderRenderer = class {
 var SVG_NS = "http://www.w3.org/2000/svg";
 var TimelineRenderer = class {
   constructor(parentEl) {
-    this.wrapperEl = parentEl.createDiv({ cls: "sabidurian-timeline-body" });
+    this.paneEl = parentEl.createDiv({ cls: "sabidurian-timeline-pane" });
+    this.wrapperEl = this.paneEl.createDiv({ cls: "sabidurian-timeline-body" });
     this.svg = document.createElementNS(SVG_NS, "svg");
     this.svg.classList.add("sabidurian-svg");
     this.wrapperEl.appendChild(this.svg);
@@ -212,6 +1020,9 @@ var TimelineRenderer = class {
   get element() {
     return this.wrapperEl;
   }
+  get overlayHost() {
+    return this.paneEl;
+  }
   get svgElement() {
     return this.svg;
   }
@@ -227,17 +1038,15 @@ var TimelineRenderer = class {
 
 // src/model/LayoutEngine.ts
 var BAR_HEIGHT = 28;
-var ROW_GAP = 4;
+var ROW_GAP = 16;
 var Y_OFFSET = 24;
 var POINT_HALF_WIDTH = 30;
-var LABEL_CHAR_WIDTH = 7;
-var LABEL_PADDING = 14;
-var MIN_LABEL_WIDTH = 40;
-var GROUP_HEADER_HEIGHT = 32;
+var GROUP_HEADER_HEIGHT = 44;
 var GROUP_GAP = 12;
 var ROW_HEIGHT = BAR_HEIGHT + ROW_GAP;
 var LayoutEngine = class {
   constructor() {
+    this.oneTaskPerRow = false;
     /** Maps absolute row index → y pixel position. Used for grouped + ungrouped. */
     this.rowYMap = /* @__PURE__ */ new Map();
     this.nextAbsoluteRow = 0;
@@ -302,7 +1111,8 @@ var LayoutEngine = class {
    * from `baseRow`. Returns the number of rows used.
    */
   assignRows(entries, axis, baseRow) {
-    const sorted = [...entries].sort((a, b) => {
+    var _a, _b;
+    const sorted = this.oneTaskPerRow ? [...entries] : [...entries].sort((a, b) => {
       if (a.startYear !== b.startYear) return a.startYear - b.startYear;
       return b.endYear - b.startYear - (a.endYear - a.startYear);
     });
@@ -315,18 +1125,18 @@ var LayoutEngine = class {
         entry.width = Math.max(axis.yearToPixel(entry.endYear) - entry.x, 4);
       }
       const effectiveLeft = entry.earliestStartYear != null ? axis.yearToPixel(entry.earliestStartYear) : entry.x;
-      const labelPx = entry.label.length * LABEL_CHAR_WIDTH + LABEL_PADDING;
+      const labelPx = labelWidth((_a = entry.displayLabel) != null ? _a : entry.label) + (((_b = entry.icon) == null ? void 0 : _b.kind) === "image" ? 20 : 0);
       let barRight;
       if (entry.isPoint) {
         barRight = entry.x + POINT_HALF_WIDTH + labelPx;
       } else {
         const fuzzyRight = entry.latestEndYear != null ? axis.yearToPixel(entry.latestEndYear) : entry.x + entry.width;
-        const labelOverflow = entry.width < MIN_LABEL_WIDTH ? entry.x + entry.width + 6 + labelPx : 0;
+        const labelOverflow = entry.x + 8 + labelPx;
         barRight = Math.max(fuzzyRight, labelOverflow) + 4;
       }
       const effectiveRight = barRight;
       let assignedRow = -1;
-      for (let r = 0; r < rowEnds.length; r++) {
+      for (let r = 0; !this.oneTaskPerRow && r < rowEnds.length; r++) {
         if (effectiveLeft >= rowEnds[r]) {
           assignedRow = r;
           break;
@@ -348,210 +1158,53 @@ var LayoutEngine = class {
   }
 };
 
-// src/utils/dateUtils.ts
-var PRECISION_ORDER = {
-  year: 0,
-  month: 1,
-  day: 2,
-  hour: 3,
-  minute: 4
-};
-function getDatePrecision(cd) {
-  if (cd.minute != null) return "minute";
-  if (cd.hour != null) return "hour";
-  if (cd.day != null) return "day";
-  if (cd.month != null) return "month";
-  return "year";
-}
-function maxPrecision(a, b) {
-  return PRECISION_ORDER[a] >= PRECISION_ORDER[b] ? a : b;
-}
-function parseSabidurianDate(value) {
-  if (value == null) return null;
-  if (typeof value === "number") {
-    if (!isFinite(value)) return null;
-    return { year: Math.round(value), isHistorical: value < 1 };
-  }
-  if (value instanceof Date) {
-    if (isNaN(value.getTime())) return null;
-    const y = value.getUTCFullYear();
-    const h = value.getUTCHours();
-    const min = value.getUTCMinutes();
-    const hasTime = h !== 0 || min !== 0 || value.getUTCSeconds() !== 0;
-    const result = {
-      year: y,
-      month: value.getUTCMonth(),
-      day: value.getUTCDate(),
-      isHistorical: y < 1
-    };
-    if (hasTime) {
-      result.hour = h;
-      if (min !== 0) result.minute = min;
+// src/utils/colorUtils.ts
+var COLOR_TONES = ["gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"];
+function normalizePropertyColors(value) {
+  const result = /* @__PURE__ */ Object.create(null);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+  for (const [property, entries] of Object.entries(value)) {
+    if (!entries || typeof entries !== "object" || Array.isArray(entries)) continue;
+    const values = /* @__PURE__ */ Object.create(null);
+    for (const [name, tone] of Object.entries(entries)) {
+      if (COLOR_TONES.includes(tone)) values[name] = tone;
     }
-    return result;
+    result[property] = values;
   }
-  const raw = typeof value === "object" && value !== null && "toString" in value ? value.toString() : String(value);
-  if (!raw || raw === "null" || raw === "undefined") return null;
-  const bceMatch = raw.match(/^(\d+)\s*BC(?:E)?$/i);
-  if (bceMatch) {
-    const bceYear = parseInt(bceMatch[1], 10);
-    return { year: -(bceYear - 1), isHistorical: true };
-  }
-  const negMatch = raw.match(/^-(\d+)$/);
-  if (negMatch) {
-    const y = -parseInt(negMatch[1], 10);
-    return { year: y, isHistorical: true };
-  }
-  const isoTimeMatch = raw.match(/^(\d{1,4})-(\d{2})-(\d{2})[T ](\d{2})(?::(\d{2}))?(?::(\d{2}))?/);
-  if (isoTimeMatch) {
-    const y = parseInt(isoTimeMatch[1], 10);
-    const result = {
-      year: y,
-      month: parseInt(isoTimeMatch[2], 10) - 1,
-      day: parseInt(isoTimeMatch[3], 10),
-      hour: parseInt(isoTimeMatch[4], 10),
-      isHistorical: false
-    };
-    if (isoTimeMatch[5] != null) {
-      result.minute = parseInt(isoTimeMatch[5], 10);
-    }
-    return result;
-  }
-  const isoDateMatch = raw.match(/^(\d{1,4})-(\d{2})-(\d{2})$/);
-  if (isoDateMatch) {
-    const y = parseInt(isoDateMatch[1], 10);
-    return {
-      year: y,
-      month: parseInt(isoDateMatch[2], 10) - 1,
-      day: parseInt(isoDateMatch[3], 10),
-      isHistorical: false
-    };
-  }
-  const ymMatch = raw.match(/^(\d{1,4})-(\d{2})$/);
-  if (ymMatch) {
-    const y = parseInt(ymMatch[1], 10);
-    return {
-      year: y,
-      month: parseInt(ymMatch[2], 10) - 1,
-      isHistorical: false
-    };
-  }
-  const yearMatch = raw.match(/^(\d{1,4})$/);
-  if (yearMatch) {
-    const y = parseInt(yearMatch[1], 10);
-    return { year: y, isHistorical: y < 1 };
-  }
-  return null;
+  return result;
 }
-function ymdToUtcMs(year, month, day, hour = 0, minute = 0) {
-  if (year >= 100) {
-    return Date.UTC(year, month, day, hour, minute);
-  }
-  const d = new Date(Date.UTC(2e3, month, day, hour, minute));
-  d.setUTCFullYear(year);
-  return d.getTime();
-}
-function sabidurianDateToYear(cd) {
-  var _a, _b, _c;
-  if (cd.isHistorical || cd.month == null) {
-    return cd.year;
-  }
-  const startMs = ymdToUtcMs(cd.year, 0, 1);
-  const endMs = ymdToUtcMs(cd.year + 1, 0, 1);
-  const valMs = ymdToUtcMs(
-    cd.year,
-    cd.month,
-    (_a = cd.day) != null ? _a : 1,
-    (_b = cd.hour) != null ? _b : 0,
-    (_c = cd.minute) != null ? _c : 0
-  );
-  return cd.year + (valMs - startMs) / (endMs - startMs);
-}
-function formatYear(year) {
-  if (year <= 0) {
-    return `${1 - year} BCE`;
-  }
-  if (year < 100) {
-    return `${year} CE`;
-  }
-  return `${year}`;
-}
-function formatSabidurianDate(cd) {
+function getPropertyTone(property, value, colors = {}) {
   var _a;
-  if (cd.isHistorical) {
-    return formatYear(cd.year);
-  }
-  if (cd.month == null) {
-    return `${cd.year}`;
-  }
-  const monthNames = [
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec"
-  ];
-  if (cd.day == null) {
-    return `${monthNames[cd.month]} ${cd.year}`;
-  }
-  if (cd.hour != null) {
-    const hh = String(cd.hour).padStart(2, "0");
-    const mm = String((_a = cd.minute) != null ? _a : 0).padStart(2, "0");
-    return `${monthNames[cd.month]} ${cd.day}, ${cd.year} ${hh}:${mm}`;
-  }
-  return `${monthNames[cd.month]} ${cd.day}, ${cd.year}`;
+  const tone = (_a = colors == null ? void 0 : colors[property.replace(/^note\./, "")]) == null ? void 0 : _a[value.trim()];
+  return COLOR_TONES.includes(tone) ? tone : void 0;
 }
-function yearToYAMLString(fractionalYear, precision = "day") {
-  if (fractionalYear < 1) {
-    return Math.round(fractionalYear);
-  }
-  const year = Math.floor(fractionalYear);
-  const frac = fractionalYear - year;
-  if (precision === "year") return String(year).padStart(4, "0");
-  const startMs = ymdToUtcMs(year, 0, 1);
-  const endMs = ymdToUtcMs(year + 1, 0, 1);
-  let targetMs = startMs + frac * (endMs - startMs);
-  if (precision === "hour") {
-    const HOUR_MS = 60 * 60 * 1e3;
-    targetMs = Math.round(targetMs / HOUR_MS) * HOUR_MS;
-  } else if (precision === "minute") {
-    const QH_MS = 15 * 60 * 1e3;
-    targetMs = Math.round(targetMs / QH_MS) * QH_MS;
-  } else if (precision === "day") {
-    const DAY_MS = 24 * 60 * 60 * 1e3;
-    targetMs = Math.round(targetMs / DAY_MS) * DAY_MS;
-  }
-  const d = new Date(targetMs);
-  const yr = d.getUTCFullYear();
-  const yStr = String(yr).padStart(4, "0");
-  const mStr = String(d.getUTCMonth() + 1).padStart(2, "0");
-  if (precision === "month") return `${yStr}-${mStr}`;
-  const dStr = String(d.getUTCDate()).padStart(2, "0");
-  if (precision === "day") return `${yStr}-${mStr}-${dStr}`;
-  const hStr = String(d.getUTCHours()).padStart(2, "0");
-  const minStr = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${yStr}-${mStr}-${dStr}T${hStr}:${minStr}`;
+function getColorForValue(value, property = "", colors = {}) {
+  var _a;
+  const trimmed = (_a = value == null ? void 0 : value.trim()) != null ? _a : "";
+  const tone = getPropertyTone(property, trimmed, colors);
+  if (tone) return `var(--sabidurian-tone-${tone})`;
+  if (/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.test(trimmed)) return "#" + trimmed.replace(/^#/, "");
+  if (!trimmed) return "var(--sabidurian-tone-gray)";
+  let hash = 0;
+  for (const char of trimmed.toLowerCase()) hash = (hash << 5) - hash + char.charCodeAt(0) | 0;
+  return `var(--sabidurian-tone-${COLOR_TONES[Math.abs(hash) % COLOR_TONES.length]})`;
+}
+function resetColorCache() {
 }
 
 // src/renderer/BarRenderer.ts
 var SVG_NS2 = "http://www.w3.org/2000/svg";
 var POINT_RADIUS = 7;
-var LABEL_PADDING2 = 8;
-var MIN_LABEL_WIDTH2 = 40;
-var _BarRenderer = class _BarRenderer {
+var LABEL_PADDING = 8;
+var BarRenderer = class {
   constructor(svg, app, tooltipParent) {
     this.tooltipEl = null;
     this.defsEl = null;
     /** When true, tooltip shows ordinal position instead of dates. */
     this.sequenceMode = false;
+    this.inspect = null;
     this.denseToSparse = null;
+    this.propertyColors = {};
     /** Optional axis reference for computing fuzzy date pixel positions. */
     this.axis = null;
     /** Property keys to display as badges on bars. Max 3. */
@@ -569,7 +1222,7 @@ var _BarRenderer = class _BarRenderer {
     this.barGroup = document.createElementNS(SVG_NS2, "g");
     this.barGroup.classList.add("sabidurian-bars-group");
     svg.appendChild(this.barGroup);
-    this.tooltipEl = tooltipParent.createDiv({ cls: "sabidurian-tooltip" });
+    this.tooltipEl = svg.ownerDocument.body.createDiv({ cls: "sabidurian-tooltip" });
     this.tooltipEl.style.display = "none";
   }
   /** Set the axis for fuzzy date rendering. Call before render(). */
@@ -616,6 +1269,7 @@ var _BarRenderer = class _BarRenderer {
     }
   }
   renderBar(entry, y) {
+    var _a, _b;
     const group = document.createElementNS(SVG_NS2, "g");
     group.classList.add("sabidurian-bar-group");
     if (this.focusTag && !this.entryHasFocusTag(entry)) {
@@ -692,54 +1346,51 @@ var _BarRenderer = class _BarRenderer {
       }
       group.appendChild(gripRight);
     }
+    this.barGroup.appendChild(group);
+    const displayLabel = (_a = entry.displayLabel) != null ? _a : fullLabel(entry.label, entry.properties, this.badgesEnabled ? this.displayProps : []);
     const text = document.createElementNS(SVG_NS2, "text");
-    text.classList.add("sabidurian-bar-label");
+    text.classList.add("sabidurian-bar-label", "sabidurian-bar-label-flow");
+    let labelX = entry.x + Math.min(LABEL_PADDING, entry.width / 2);
+    labelX += this.renderTaskImage(group, entry, labelX, y + BAR_HEIGHT / 2);
+    text.setAttribute("x", `${labelX}`);
     text.setAttribute("y", `${y + BAR_HEIGHT / 2 + 4}`);
-    text.textContent = entry.label;
-    if (entry.width >= MIN_LABEL_WIDTH2) {
-      text.setAttribute("x", `${entry.x + LABEL_PADDING2}`);
-      text.classList.add("sabidurian-bar-label-inside");
-      const clipId = `clip-${entry.file.path.replace(/[^a-zA-Z0-9]/g, "-")}`;
-      const clipPath = document.createElementNS(SVG_NS2, "clipPath");
-      clipPath.id = clipId;
-      const clipRect = document.createElementNS(SVG_NS2, "rect");
-      clipRect.setAttribute("x", `${entry.x}`);
-      clipRect.setAttribute("y", `${y}`);
-      clipRect.setAttribute("width", `${entry.width}`);
-      clipRect.setAttribute("height", `${BAR_HEIGHT}`);
-      clipPath.appendChild(clipRect);
-      group.appendChild(clipPath);
-      text.setAttribute("clip-path", `url(#${clipId})`);
-    } else {
-      text.setAttribute("x", `${entry.x + entry.width + 6}`);
-      text.classList.add("sabidurian-bar-label-outside");
-    }
+    const props = this.badgesEnabled ? this.displayProps.filter((key) => entry.properties[key] && entry.properties[key] !== "null") : [];
+    text.textContent = props.length ? entry.label : this.displayProps.length ? entry.label : displayLabel;
     group.appendChild(text);
-    if (this.badgesEnabled && this.displayProps.length > 0 && entry.width >= this.badgeMinWidth) {
-      const propParts = [];
-      for (const prop of this.displayProps) {
-        const value = entry.properties[prop];
-        if (value && value !== "null") {
-          propParts.push(String(value).replace(/\[\[|\]\]/g, "").slice(0, 20));
-        }
-      }
-      if (propParts.length > 0) {
-        const inlineText = propParts.join(" \xB7 ");
-        const labelWidth = entry.label.length * 7 + LABEL_PADDING2;
-        const propX = entry.x + labelWidth + 8;
-        const propY = y + BAR_HEIGHT / 2 + 4;
-        const propEl = document.createElementNS(SVG_NS2, "text");
-        propEl.setAttribute("x", `${propX}`);
-        propEl.setAttribute("y", `${propY}`);
-        propEl.textContent = inlineText;
-        propEl.classList.add("sabidurian-bar-prop-inline");
-        if (entry.width >= MIN_LABEL_WIDTH2) {
-          const clipId = `clip-${entry.file.path.replace(/[^a-zA-Z0-9]/g, "-")}`;
-          propEl.setAttribute("clip-path", `url(#${clipId})`);
-        }
-        group.appendChild(propEl);
-      }
+    const measure = (el) => {
+      var _a2, _b2;
+      return ((_a2 = el.getComputedTextLength) == null ? void 0 : _a2.call(el)) || Math.max(0, labelWidth((_b2 = el.textContent) != null ? _b2 : "") - 20);
+    };
+    let labelRight = labelX + measure(text);
+    for (const property of props) {
+      const value = entry.properties[property];
+      const badge = document.createElementNS(SVG_NS2, "g");
+      badge.classList.add("sabidurian-property-badge");
+      badge.dataset.property = property;
+      badge.dataset.sabidurianColor = (_b = getPropertyTone(property, value, this.propertyColors)) != null ? _b : "gray";
+      const bg = document.createElementNS(SVG_NS2, "rect");
+      bg.setAttribute("x", `${labelRight + 7}`);
+      bg.setAttribute("y", `${y + 4}`);
+      bg.setAttribute("height", `${BAR_HEIGHT - 8}`);
+      bg.setAttribute("rx", "4");
+      const valueText = document.createElementNS(SVG_NS2, "text");
+      valueText.setAttribute("x", `${labelRight + 13}`);
+      valueText.setAttribute("y", `${y + BAR_HEIGHT / 2 + 4}`);
+      valueText.textContent = value;
+      badge.append(bg, valueText);
+      group.appendChild(badge);
+      const width = measure(valueText) + 12;
+      bg.setAttribute("width", `${width}`);
+      labelRight += 7 + width;
     }
+    const hit = document.createElementNS(SVG_NS2, "rect");
+    hit.setAttribute("x", `${entry.x}`);
+    hit.setAttribute("y", `${y - 6}`);
+    hit.setAttribute("width", `${Math.max(44, entry.width, labelRight - entry.x + 8)}`);
+    hit.setAttribute("height", "40");
+    hit.setAttribute("fill", "transparent");
+    hit.classList.add("sabidurian-task-hit");
+    group.appendChild(hit);
     if (entry.locked) {
       group.classList.add("sabidurian-bar-locked");
       const iconSize = 12;
@@ -821,7 +1472,8 @@ var _BarRenderer = class _BarRenderer {
     diamond.classList.add("sabidurian-point-marker");
     group.appendChild(diamond);
     const text = document.createElementNS(SVG_NS2, "text");
-    text.setAttribute("x", `${cx + r + 6}`);
+    const labelX = cx + r + 6;
+    text.setAttribute("x", `${labelX + this.renderTaskImage(group, entry, labelX, cy)}`);
     text.setAttribute("y", `${cy + 4}`);
     text.classList.add("sabidurian-bar-label", "sabidurian-bar-label-outside");
     text.textContent = entry.label;
@@ -829,9 +1481,40 @@ var _BarRenderer = class _BarRenderer {
     this.addInteractions(group, entry);
     this.barGroup.appendChild(group);
   }
+  renderTaskImage(group, entry, x, centerY) {
+    var _a;
+    if (((_a = entry.icon) == null ? void 0 : _a.kind) !== "image") return 0;
+    const image = this.svg.ownerDocument.createElementNS(SVG_NS2, "image");
+    image.classList.add("sabidurian-task-image");
+    image.setAttribute("href", entry.icon.url);
+    image.setAttribute("x", String(x));
+    image.setAttribute("y", String(centerY - 8));
+    image.setAttribute("width", "16");
+    image.setAttribute("height", "16");
+    image.setAttribute("aria-hidden", "true");
+    group.append(image);
+    return 20;
+  }
   addInteractions(group, entry) {
+    var _a;
+    group.setAttribute("role", "button");
+    group.setAttribute("tabindex", "0");
+    group.setAttribute("aria-label", `${(_a = entry.displayLabel) != null ? _a : entry.label}, ${formatSabidurianDate(entry.start)}`);
+    group.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (this.inspect) this.inspect(entry);
+        else void this.app.workspace.getLeaf(false).openFile(entry.file);
+      }
+    });
     group.addEventListener("click", (e) => {
       e.preventDefault();
+      if (this.inspect) {
+        this.hideTooltip();
+        this.inspect(entry);
+        return;
+      }
       const leaf = this.app.workspace.getLeaf(false);
       leaf.openFile(entry.file);
     });
@@ -847,6 +1530,7 @@ var _BarRenderer = class _BarRenderer {
       this.moveTooltip(e);
     });
     group.addEventListener("mouseover", (e) => {
+      if (this.inspect) return;
       this.app.workspace.trigger("hover-link", {
         event: e,
         source: "sabidurian-timeline",
@@ -860,30 +1544,31 @@ var _BarRenderer = class _BarRenderer {
   }
   /** Build tooltip content using safe DOM methods (no innerHTML). */
   showTooltip(entry, e) {
-    var _a, _b;
+    var _a, _b, _c;
     if (!this.tooltipEl) return;
+    if (this.svg.closest(".sabidurian-measure-mode")) {
+      this.hideTooltip();
+      return;
+    }
     this.tooltipEl.empty();
     const strong = this.tooltipEl.createEl("strong");
-    strong.textContent = entry.label;
+    strong.textContent = (_a = entry.displayLabel) != null ? _a : entry.label;
+    prependTaskImage(strong, entry.icon);
     if (this.sequenceMode) {
       const d2s = this.denseToSparse;
       const rawStart = Math.round(entry.startYear);
       const rawEnd = Math.round(entry.endYear) - 1;
-      const startPos = d2s ? (_a = d2s[rawStart - 1]) != null ? _a : rawStart : rawStart;
-      const endPos = d2s ? (_b = d2s[rawEnd - 1]) != null ? _b : rawEnd : rawEnd;
+      const startPos = d2s ? (_b = d2s[rawStart - 1]) != null ? _b : rawStart : rawStart;
+      const endPos = d2s ? (_c = d2s[rawEnd - 1]) != null ? _c : rawEnd : rawEnd;
       this.tooltipEl.createEl("br");
       this.tooltipEl.appendText(
         endPos > startPos ? `Position ${startPos} \u2192 ${endPos}` : `Position ${startPos}`
       );
     } else {
       this.tooltipEl.createEl("br");
-      let dateText = formatSabidurianDate(entry.start);
+      let dateText = formatDateRange(entry.start, entry.isPoint ? null : entry.end);
       if (entry.isOngoing) {
         dateText += " \u2192 present (ongoing)";
-      } else if (entry.end && !entry.isPoint) {
-        dateText += ` \u2192 ${formatSabidurianDate(entry.end)}`;
-      } else if (entry.isPoint) {
-        dateText += " (point event)";
       }
       this.tooltipEl.appendText(dateText);
     }
@@ -899,32 +1584,27 @@ var _BarRenderer = class _BarRenderer {
       span.textContent = "Latest end:";
       this.tooltipEl.appendText(` ${formatSabidurianDate(entry.latestEnd)}`);
     }
-    for (const [key, val] of Object.entries(entry.properties)) {
-      const keyLower = key.toLowerCase();
-      if (val && val !== "null" && !_BarRenderer.TOOLTIP_EXCLUDE_BASE.has(keyLower) && !this.tooltipExcludeExtra.has(keyLower)) {
-        this.tooltipEl.createEl("br");
-        const span = this.tooltipEl.createEl("span", { cls: "sabidurian-tooltip-prop" });
-        span.textContent = `${key}:`;
-        this.tooltipEl.appendText(` ${val}`);
-      }
-    }
     this.tooltipEl.style.display = "block";
     this.moveTooltip(e);
   }
   moveTooltip(e) {
+    var _a;
     if (!this.tooltipEl) return;
     const gapX = 12;
     const gapY = 8;
     const tw = this.tooltipEl.offsetWidth || 200;
     const th = this.tooltipEl.offsetHeight || 60;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
+    const viewport = (_a = this.svg.ownerDocument.defaultView) != null ? _a : window;
+    const vw = viewport.innerWidth;
+    const vh = viewport.innerHeight;
     const margin = 6;
     let x = e.clientX + gapX;
     let y = e.clientY - gapY - th;
     if (x + tw > vw - margin) x = e.clientX - tw - gapX;
     if (y < margin) y = e.clientY + gapY;
     if (y + th > vh - margin) y = vh - th - margin;
+    x = Math.max(margin, Math.min(x, vw - tw - margin));
+    y = Math.max(margin, y);
     this.tooltipEl.style.left = `${x}px`;
     this.tooltipEl.style.top = `${y}px`;
   }
@@ -939,7 +1619,7 @@ var _BarRenderer = class _BarRenderer {
   }
 };
 /** Property key prefixes to exclude from tooltip (system/file metadata). */
-_BarRenderer.TOOLTIP_EXCLUDE_BASE = /* @__PURE__ */ new Set([
+BarRenderer.TOOLTIP_EXCLUDE_BASE = /* @__PURE__ */ new Set([
   "file name",
   "file base name",
   "file full name",
@@ -950,7 +1630,111 @@ _BarRenderer.TOOLTIP_EXCLUDE_BASE = /* @__PURE__ */ new Set([
   "created time",
   "modified time"
 ]);
-var BarRenderer = _BarRenderer;
+
+// src/renderer/TaskEdgeNavigation.ts
+var import_obsidian2 = require("obsidian");
+var TaskEdgeNavigation = class {
+  constructor(body, host, entries, rowY, jump) {
+    this.body = body;
+    this.entries = entries;
+    this.rowY = rowY;
+    this.jump = jump;
+    this.buttons = /* @__PURE__ */ new Map();
+    this.frame = null;
+    this.resize = null;
+    this.schedule = () => {
+      if (this.frame === null) this.frame = requestAnimationFrame(() => {
+        this.frame = null;
+        this.refresh();
+      });
+    };
+    var _a;
+    this.layer = body.ownerDocument.createElement("div");
+    this.layer.className = "sabidurian-task-edges";
+    host.append(this.layer);
+    body.addEventListener("scroll", this.schedule, { passive: true });
+    const Observer = (_a = body.ownerDocument.defaultView) == null ? void 0 : _a.ResizeObserver;
+    if (Observer) {
+      this.resize = new Observer(this.schedule);
+      this.resize.observe(body);
+    }
+    this.schedule();
+  }
+  refresh() {
+    var _a, _b;
+    const { scrollLeft: left, scrollTop: top, clientWidth: width, clientHeight: height } = this.body;
+    if (!width || !height) return;
+    const right = left + width;
+    this.layer.style.width = `${width}px`;
+    this.layer.style.height = `${height}px`;
+    const candidates = /* @__PURE__ */ new Map();
+    for (const entry of this.entries) {
+      if (entry.row < 0) continue;
+      const y = this.rowY(entry.row) + BAR_HEIGHT / 2 - top;
+      if (y < 0 || y > height) continue;
+      const end = entry.x + entry.width;
+      const add = (boundary, distance) => {
+        const key = `${entry.row}:${boundary}`;
+        if (!candidates.has(key) || candidates.get(key).distance > distance) candidates.set(key, { entry, boundary, y, distance });
+      };
+      if (entry.x < left - 1) add("start", Math.max(0, left - end));
+      if (!entry.isOngoing && end > right + 1) add("end", Math.max(0, entry.x - right));
+    }
+    const keep = /* @__PURE__ */ new Set();
+    for (const { entry, boundary, y } of candidates.values()) {
+      const key = `${entry.file.path}:${boundary}`;
+      keep.add(key);
+      let button = this.buttons.get(key);
+      if (!button) {
+        button = this.body.ownerDocument.createElement("button");
+        button.type = "button";
+        button.className = `sabidurian-task-edge sabidurian-task-edge-${boundary}`;
+        button.dataset.filePath = entry.file.path;
+        button.dataset.boundary = boundary;
+        const icon = this.body.ownerDocument.createElement("span");
+        icon.setAttribute("aria-hidden", "true");
+        button.append(icon);
+        const label = (_a = entry.displayLabel) != null ? _a : entry.label;
+        (0, import_obsidian2.setTooltip)(button, label, { delay: 100 });
+        if (((_b = entry.icon) == null ? void 0 : _b.kind) === "image") {
+          const target = button;
+          target.addEventListener("pointerover", (event) => {
+            event.stopPropagation();
+            if (event.pointerType !== "mouse" || event.relatedTarget instanceof target.ownerDocument.defaultView.Node && target.contains(event.relatedTarget)) return;
+            const content = target.ownerDocument.createDocumentFragment();
+            const caption = target.ownerDocument.createElement("span");
+            caption.textContent = label;
+            prependTaskImage(caption, entry.icon);
+            content.append(caption);
+            (0, import_obsidian2.displayTooltip)(target, content, { delay: 100 });
+          });
+        }
+        button.setAttribute("aria-description", `Jump to the ${boundary} of this task`);
+        for (const event of ["pointerdown", "mousedown", "touchstart", "keydown"]) button.addEventListener(event, (e) => e.stopPropagation());
+        button.onclick = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.jump(entry, boundary);
+        };
+        this.layer.append(button);
+        this.buttons.set(key, button);
+      }
+      button.style.top = `${y}px`;
+    }
+    for (const [key, button] of this.buttons) if (!keep.has(key)) {
+      button.remove();
+      this.buttons.delete(key);
+    }
+  }
+  destroy() {
+    var _a;
+    if (this.frame !== null) cancelAnimationFrame(this.frame);
+    this.body.removeEventListener("scroll", this.schedule);
+    (_a = this.resize) == null ? void 0 : _a.disconnect();
+    this.layer.remove();
+    this.buttons.clear();
+  }
+};
 
 // src/renderer/SideTableRenderer.ts
 var DEFAULT_TABLE_WIDTH = 220;
@@ -958,6 +1742,7 @@ var MIN_TABLE_WIDTH = 120;
 var MAX_TABLE_WIDTH = 500;
 var SideTableRenderer = class {
   constructor(parentEl, app, initialWidth) {
+    this.propertyColors = {};
     this.collapsed = false;
     this.onWidthChange = null;
     this.onRowHover = null;
@@ -993,6 +1778,7 @@ var SideTableRenderer = class {
         cls: "sabidurian-st-link",
         text: entry.label
       });
+      prependTaskImage(titleLink, entry.icon);
       titleLink.addEventListener("click", (e) => {
         e.preventDefault();
         this.app.workspace.getLeaf(false).openFile(entry.file);
@@ -1010,7 +1796,7 @@ var SideTableRenderer = class {
       for (const col of columns) {
         const val = (_a = entry.properties[col.key]) != null ? _a : "";
         const cell = row.createDiv({ cls: "sabidurian-st-cell" });
-        cell.setText(val === "null" ? "" : val);
+        this.renderValue(cell, col, val);
       }
       row.addEventListener("mouseenter", () => {
         var _a2;
@@ -1067,6 +1853,7 @@ var SideTableRenderer = class {
           cls: "sabidurian-st-link",
           text: entry.label
         });
+        prependTaskImage(titleLink, entry.icon);
         titleLink.addEventListener("click", (e) => {
           e.preventDefault();
           this.app.workspace.getLeaf(false).openFile(entry.file);
@@ -1084,7 +1871,7 @@ var SideTableRenderer = class {
         for (const col of columns) {
           const val = (_a = entry.properties[col.key]) != null ? _a : "";
           const cell = row.createDiv({ cls: "sabidurian-st-cell" });
-          cell.setText(val === "null" ? "" : val);
+          this.renderValue(cell, col, val);
         }
         row.addEventListener("mouseenter", () => {
           var _a2;
@@ -1100,6 +1887,12 @@ var SideTableRenderer = class {
     }
   }
   /** Set a callback for group collapse/expand toggle. */
+  renderValue(cell, col, value) {
+    if (!value || value === "null") return;
+    const tone = getPropertyTone(col.propId, value, this.propertyColors);
+    const content = cell.createSpan({ text: value });
+    if (tone) content.dataset.sabidurianColor = tone;
+  }
   setGroupToggleCallback(cb) {
     this.onGroupToggle = cb;
   }
@@ -1200,6 +1993,10 @@ var GroupHeaderRenderer = class {
     const g = document.createElementNS(SVG_NS3, "g");
     g.classList.add("sabidurian-group-header");
     g.dataset.groupName = group.name;
+    g.setAttribute("role", "button");
+    g.setAttribute("tabindex", "0");
+    g.setAttribute("aria-label", `${group.name || "Unassigned"} (${group.entries.length} tasks)`);
+    g.setAttribute("aria-expanded", String(!group.collapsed));
     if (group.collapsed) g.classList.add("sabidurian-group-collapsed");
     const y = group.headerY;
     const height = GROUP_HEADER_HEIGHT;
@@ -1237,83 +2034,38 @@ var GroupHeaderRenderer = class {
       e.stopPropagation();
       (_a = this.onToggle) == null ? void 0 : _a.call(this, group.name);
     });
+    g.addEventListener("keydown", (e) => {
+      var _a;
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        (_a = this.onToggle) == null ? void 0 : _a.call(this, group.name);
+      }
+    });
     this.groupHeaderGroup.appendChild(g);
   }
   setToggleCallback(cb) {
     this.onToggle = cb;
+  }
+  setScrollLeft(px) {
+    this.groupHeaderGroup.querySelectorAll("text").forEach((el) => el.setAttribute("transform", `translate(${px}, 0)`));
   }
   destroy() {
     this.groupHeaderGroup.remove();
   }
 };
 
-// src/utils/colorUtils.ts
-var COLOR_VARS = [
-  "var(--color-blue)",
-  "var(--color-purple)",
-  "var(--color-green)",
-  "var(--color-orange)",
-  "var(--color-red)",
-  "var(--color-yellow)",
-  "var(--color-cyan)",
-  "var(--color-pink)",
-  "var(--interactive-accent)",
-  "var(--color-base-70, var(--color-blue))",
-  "var(--color-accent-2, var(--color-purple))",
-  "var(--tag-color, var(--color-green))",
-  "var(--link-color, var(--color-cyan))",
-  "var(--text-accent, var(--color-orange))",
-  "var(--color-base-50, var(--color-red))",
-  "var(--color-accent-1, var(--color-yellow))"
-];
-function hashString(str) {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash |= 0;
-  }
-  return Math.abs(hash);
-}
-var colorCache = /* @__PURE__ */ new Map();
-var nextColorIndex = 0;
-function isHexColor(str) {
-  return /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.test(str);
-}
-function normalizeHex(str) {
-  let hex = str.startsWith("#") ? str.slice(1) : str;
-  if (hex.length === 3) {
-    hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
-  }
-  return "#" + hex;
-}
-function getColorForValue(value) {
-  if (!value) return COLOR_VARS[0];
-  const trimmed = value.trim();
-  if (isHexColor(trimmed)) {
-    return normalizeHex(trimmed);
-  }
-  const key = trimmed.toLowerCase();
-  if (colorCache.has(key)) {
-    return COLOR_VARS[colorCache.get(key) % COLOR_VARS.length];
-  }
-  const idx = hashString(key) % COLOR_VARS.length;
-  colorCache.set(key, idx);
-  return COLOR_VARS[idx];
-}
-function resetColorCache() {
-  colorCache.clear();
-  nextColorIndex = 0;
-}
-
 // src/interaction/DragManager.ts
-var import_obsidian = require("obsidian");
+var import_obsidian3 = require("obsidian");
 var SVG_NS4 = "http://www.w3.org/2000/svg";
 var EDGE_THRESHOLD = 14;
 var MIN_DRAG_PX = 4;
 var MIN_BAR_YEARS = 2e-3;
 var DragManager = class {
   constructor(svg, wrapperEl, app, axis, scale) {
+    this.locked = false;
+    this.detachListeners = [];
+    this.scheduling = null;
+    this.persist = null;
     this.entries = [];
     this.getRowY = () => 0;
     this.ctx = {
@@ -1352,19 +2104,25 @@ var DragManager = class {
       const svgRect = this.svg.getBoundingClientRect();
       const localX = e.clientX - svgRect.left;
       const currentYear = this.axis.pixelToYear(localX);
-      switch (this.ctx.state) {
-        case "drag-move":
-          this.handleDragMove(currentYear, dx);
-          break;
-        case "drag-resize-start":
-          this.handleResizeStart(currentYear);
-          break;
-        case "drag-resize-end":
-          this.handleResizeEnd(currentYear);
-          break;
-        case "drag-create":
-          this.handleCreateDrag(currentYear);
-          break;
+      try {
+        switch (this.ctx.state) {
+          case "drag-move":
+            this.handleDragMove(currentYear, dx);
+            break;
+          case "drag-resize-start":
+            this.handleResizeStart(currentYear);
+            break;
+          case "drag-resize-end":
+            this.handleResizeEnd(currentYear);
+            break;
+          case "drag-create":
+            this.handleCreateDrag(currentYear);
+            break;
+        }
+      } catch (error) {
+        new import_obsidian3.Notice(String(error));
+        this.resetDrag();
+        return;
       }
       this.updateDateLabel(e);
     };
@@ -1376,11 +2134,14 @@ var DragManager = class {
       const state = this.ctx.state;
       const entry = this.ctx.entry;
       if (state === "drag-create") {
-        this.finishCreate();
+        void this.finishCreate().catch((error) => new import_obsidian3.Notice(String(error)));
       } else if (entry && (state === "drag-move" || state === "drag-resize-start" || state === "drag-resize-end")) {
-        this.finishEntryDrag(entry);
+        void this.finishEntryDrag(entry).catch((error) => new import_obsidian3.Notice(String(error)));
       }
       this.suppressNextClick();
+      this.resetDrag();
+    };
+    this.cancelDrag = () => {
       this.resetDrag();
     };
     this.svg = svg;
@@ -1407,34 +2168,29 @@ var DragManager = class {
     groups.forEach((group, idx) => {
       if (idx >= entries.length) return;
       const entry = entries[idx];
-      group.addEventListener("mousemove", (e) => {
+      this.listen(group, "mousemove", (e) => {
         if (this.ctx.state !== "idle") return;
-        if (entry.locked) {
-          group.style.cursor = "default";
+        if (this.locked || entry.locked) {
+          group.style.cursor = this.locked ? "pointer" : "default";
           return;
         }
         const cursor = this.getCursorType(entry, e);
         group.style.cursor = cursor;
       });
-      group.addEventListener("mousedown", (e) => {
-        if (entry.locked) return;
+      this.listen(group, "mousedown", (e) => {
+        var _a;
+        if ((_a = e.sourceCapabilities) == null ? void 0 : _a.firesTouchEvents) return;
+        if (this.locked || entry.locked) return;
         if (e.button !== 0) return;
         e.preventDefault();
         e.stopPropagation();
         this.beginPendingDrag(entry, e);
       });
-      if (entry.isOngoing) {
-        group.addEventListener("mousemove", (e) => {
-          if (this.ctx.state !== "idle") return;
-          const rect = e.currentTarget.getBoundingClientRect();
-          const localX = e.clientX - rect.left;
-          if (localX > entry.width - EDGE_THRESHOLD) {
-            group.style.cursor = "grab";
-          }
-        });
-      }
     });
-    this.svg.addEventListener("mousedown", (e) => {
+    this.listen(this.svg, "mousedown", (e) => {
+      var _a;
+      if (this.locked) return;
+      if ((_a = e.sourceCapabilities) == null ? void 0 : _a.firesTouchEvents) return;
       if (this.ctx.state !== "idle") return;
       if (e.target.closest(".sabidurian-bar-group")) return;
       if (e.target.closest(".sabidurian-group-header")) return;
@@ -1445,25 +2201,22 @@ var DragManager = class {
     });
     document.addEventListener("mousemove", this.onMouseMove);
     document.addEventListener("mouseup", this.onMouseUp);
+    window.addEventListener("blur", this.cancelDrag);
   }
   getCursorType(entry, e) {
-    if (entry.isPoint) return "grab";
-    const rect = e.currentTarget.getBoundingClientRect();
-    const localX = e.clientX - rect.left;
-    const barWidth = entry.width;
-    if (localX < EDGE_THRESHOLD) return "col-resize";
-    if (localX > barWidth - EDGE_THRESHOLD && barWidth > EDGE_THRESHOLD * 2) return "col-resize";
-    return "grab";
+    return this.getDragType(entry, e) === "drag-move" ? "grab" : "col-resize";
+  }
+  /** Use the real bar bounds, excluding overflow labels and fuzzy extensions. */
+  getDragType(entry, e) {
+    const barLocalX = e.clientX - this.svg.getBoundingClientRect().left - entry.x;
+    if (!entry.isPoint && entry.width > EDGE_THRESHOLD * 3 && barLocalX >= 0 && barLocalX <= entry.width) {
+      if (barLocalX < EDGE_THRESHOLD) return "drag-resize-start";
+      if (barLocalX > entry.width - EDGE_THRESHOLD && !entry.isOngoing) return "drag-resize-end";
+    }
+    return "drag-move";
   }
   beginPendingDrag(entry, e) {
-    const svgRect = this.svg.getBoundingClientRect();
-    const localX = e.clientX - svgRect.left;
-    const barLocalX = localX - entry.x;
-    let pendingType = "drag-move";
-    if (!entry.isPoint) {
-      if (barLocalX < EDGE_THRESHOLD) pendingType = "drag-resize-start";
-      else if (barLocalX > entry.width - EDGE_THRESHOLD && !entry.isOngoing) pendingType = "drag-resize-end";
-    }
+    const pendingType = this.getDragType(entry, e);
     this.ctx = {
       state: "pending",
       entry,
@@ -1506,11 +2259,13 @@ var DragManager = class {
     setTimeout(() => document.removeEventListener("click", handler, true), 200);
   }
   handleDragMove(currentYear, dx) {
+    var _a, _b, _c;
     const entry = this.ctx.entry;
     const yearDelta = this.axis.pixelToYear(this.axis.yearToPixel(this.ctx.originalStartYear) + dx) - this.ctx.originalStartYear;
     const duration = this.ctx.originalEndYear - this.ctx.originalStartYear;
-    const newStart = this.scale.snapToUnit(this.ctx.originalStartYear + yearDelta);
-    const newEnd = newStart + duration;
+    const moved = (_a = this.scheduling) == null ? void 0 : _a.edit("move", { start: this.ctx.originalStartYear, end: this.ctx.originalEndYear }, this.ctx.originalStartYear + yearDelta);
+    const newStart = (_b = moved == null ? void 0 : moved.start) != null ? _b : this.scale.snapToUnit(this.ctx.originalStartYear + yearDelta);
+    const newEnd = (_c = moved == null ? void 0 : moved.end) != null ? _c : newStart + duration;
     if (this.ctx.ghostEl) {
       const x = this.axis.yearToPixel(newStart);
       const w = Math.max(this.axis.yearToPixel(newEnd) - x, 4);
@@ -1521,8 +2276,9 @@ var DragManager = class {
     this.ctx._newEnd = newEnd;
   }
   handleResizeStart(currentYear) {
-    const snapped = this.scale.snapToUnit(currentYear);
-    const maxStart = this.ctx.originalEndYear - MIN_BAR_YEARS;
+    var _a, _b;
+    const snapped = (_b = (_a = this.scheduling) == null ? void 0 : _a.snap(currentYear)) != null ? _b : this.scale.snapToUnit(currentYear);
+    const maxStart = this.scheduling ? this.scheduling.edit("resize-start", { start: this.ctx.originalStartYear, end: this.ctx.originalEndYear }, currentYear).start : this.ctx.originalEndYear - MIN_BAR_YEARS;
     const newStart = Math.min(snapped, maxStart);
     if (this.ctx.ghostEl) {
       const x = this.axis.yearToPixel(newStart);
@@ -1534,8 +2290,9 @@ var DragManager = class {
     this.ctx._newEnd = this.ctx.originalEndYear;
   }
   handleResizeEnd(currentYear) {
-    const snapped = this.scale.snapToUnit(currentYear);
-    const minEnd = this.ctx.originalStartYear + MIN_BAR_YEARS;
+    var _a, _b;
+    const snapped = (_b = (_a = this.scheduling) == null ? void 0 : _a.snap(currentYear)) != null ? _b : this.scale.snapToUnit(currentYear);
+    const minEnd = this.scheduling ? this.scheduling.edit("resize-end", { start: this.ctx.originalStartYear, end: this.ctx.originalEndYear }, currentYear).end : this.ctx.originalStartYear + MIN_BAR_YEARS;
     const newEnd = Math.max(snapped, minEnd);
     if (this.ctx.ghostEl) {
       const x = this.axis.yearToPixel(this.ctx.originalStartYear);
@@ -1546,9 +2303,11 @@ var DragManager = class {
     this.ctx._newEnd = newEnd;
   }
   handleCreateDrag(currentYear) {
-    const snapped = this.scale.snapToUnit(currentYear);
-    const start = Math.min(this.ctx.originalStartYear, snapped);
-    const end = Math.max(this.ctx.originalStartYear, snapped);
+    var _a, _b, _c, _d, _e;
+    const snapped = (_b = (_a = this.scheduling) == null ? void 0 : _a.snap(currentYear)) != null ? _b : this.scale.snapToUnit(currentYear);
+    const created = (_c = this.scheduling) == null ? void 0 : _c.edit("create", { start: this.ctx.originalStartYear, end: this.ctx.originalEndYear }, currentYear);
+    const start = (_d = created == null ? void 0 : created.start) != null ? _d : Math.min(this.ctx.originalStartYear, snapped);
+    const end = (_e = created == null ? void 0 : created.end) != null ? _e : Math.max(this.ctx.originalStartYear, snapped);
     if (this.ctx.ghostEl) {
       const x = this.axis.yearToPixel(start);
       const w = Math.max(this.axis.yearToPixel(end) - x, 4);
@@ -1559,10 +2318,11 @@ var DragManager = class {
     this.ctx._newEnd = end;
   }
   async finishEntryDrag(entry) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     const newStart = this.ctx._newStart;
     const newEnd = this.ctx._newEnd;
-    if (Math.abs(newStart - this.ctx.originalStartYear) < 1e-4 && Math.abs(newEnd - this.ctx.originalEndYear) < 1e-4) {
+    if (!Number.isFinite(newStart) || !Number.isFinite(newEnd)) return;
+    if (Math.abs(newStart - this.ctx.originalStartYear) < 1e-11 && Math.abs(newEnd - this.ctx.originalEndYear) < 1e-11) {
       return;
     }
     if (this._sequenceMode) {
@@ -1586,8 +2346,13 @@ var DragManager = class {
         }
       });
       const label = newOrderEnd > newOrder ? `position ${newOrder}\u2013${newOrderEnd}` : `position ${newOrder}`;
-      new import_obsidian.Notice(`Moved "${entry.label}" to ${label}`, 5e3);
+      new import_obsidian3.Notice(`Moved "${entry.label}" to ${label}`, 5e3);
       (_c = this.onDragComplete) == null ? void 0 : _c.call(this);
+      return;
+    }
+    if (this.persist) {
+      await this.persist(entry, newStart, newEnd);
+      (_d = this.onDragComplete) == null ? void 0 : _d.call(this);
       return;
     }
     const startPrecision = this.precisionForEntry(entry, "start");
@@ -1609,18 +2374,19 @@ var DragManager = class {
       undoEntries.push({ file: entry.file, prop: this.endPropName, oldVal: oldEndStr, newVal: endDateStr });
     }
     this.lastUndo = undoEntries;
-    const notice = new import_obsidian.Notice(
+    const notice = new import_obsidian3.Notice(
       `Moved "${entry.label}" to ${startDateStr}`,
       8e3
     );
-    (_d = this.onDragComplete) == null ? void 0 : _d.call(this);
+    (_e = this.onDragComplete) == null ? void 0 : _e.call(this);
   }
   async finishCreate() {
     var _a;
     const newStart = this.ctx._newStart;
     const newEnd = this.ctx._newEnd;
-    if (Math.abs(newEnd - newStart) < MIN_BAR_YEARS) return;
-    (_a = this.onCreateEntry) == null ? void 0 : _a.call(this, newStart, newEnd);
+    if (!Number.isFinite(newStart) || !Number.isFinite(newEnd)) return;
+    if (!this.scheduling && Math.abs(newEnd - newStart) < MIN_BAR_YEARS) return;
+    await ((_a = this.onCreateEntry) == null ? void 0 : _a.call(this, newStart, newEnd));
   }
   createGhost(x, y, width) {
     this.removeGhost();
@@ -1715,8 +2481,22 @@ var DragManager = class {
   setSequenceMode(opts) {
     this._sequenceMode = opts;
   }
+  setLocked(locked) {
+    this.locked = locked;
+    if (locked) this.resetDrag();
+    this.svg.querySelectorAll(".sabidurian-bar-group").forEach((group) => {
+      group.style.cursor = locked ? "pointer" : "";
+    });
+  }
+  listen(target, type, handler) {
+    target.addEventListener(type, handler);
+    this.detachListeners.push(() => target.removeEventListener(type, handler));
+  }
   destroy() {
     var _a;
+    for (const detach of this.detachListeners.splice(0)) detach();
+    this.resetDrag();
+    window.removeEventListener("blur", this.cancelDrag);
     document.removeEventListener("mousemove", this.onMouseMove);
     document.removeEventListener("mouseup", this.onMouseUp);
     this.removeGhost();
@@ -1726,12 +2506,15 @@ var DragManager = class {
 };
 
 // src/renderer/ArrowRenderer.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 var SVG_NS5 = "http://www.w3.org/2000/svg";
 var ARROW_HEAD_SIZE = 8;
 var ARROW_STROKE_WIDTH = 2;
 var ArrowRenderer = class {
   constructor(svg, app) {
+    this.dependencyProperty = "blocked-by";
+    this.locked = false;
+    this.removeEdge = null;
     this.edges = [];
     this.getRowY = () => 0;
     // Hover state
@@ -1760,10 +2543,12 @@ var ArrowRenderer = class {
     this.edges = [];
     const byPath = /* @__PURE__ */ new Map();
     for (const entry of entries) {
+      if (entry.row < 0) continue;
       byPath.set(entry.file.path, entry);
     }
     for (const entry of entries) {
-      for (const depPath of entry.dependencies) {
+      if (entry.row < 0) continue;
+      for (const depPath of new Set(entry.dependencies)) {
         const blocker = byPath.get(depPath);
         if (!blocker) continue;
         if (blocker === entry) continue;
@@ -1773,6 +2558,7 @@ var ArrowRenderer = class {
     }
     this.renderEdges();
     this.renderHandles(entries);
+    this.setLocked(this.locked);
     return this.edges;
   }
   renderEdges() {
@@ -1866,7 +2652,7 @@ var ArrowRenderer = class {
     }
   }
   showRemoveMenu(e, edge) {
-    const menu = new import_obsidian2.Menu();
+    const menu = new import_obsidian4.Menu();
     menu.addItem((item) => {
       item.setTitle(`Remove dependency: ${edge.from.label} \u2192 ${edge.to.label}`).setIcon("trash-2").onClick(async () => {
         await this.removeDependency(edge);
@@ -1875,22 +2661,28 @@ var ArrowRenderer = class {
     menu.showAtMouseEvent(e);
   }
   async removeDependency(edge) {
+    if (this.locked || edge.to.locked) return;
+    if (this.removeEdge) {
+      await this.removeEdge(edge.from, edge.to);
+      return;
+    }
     const targetFile = edge.to.file;
     const blockerBasename = edge.from.file.basename;
     await this.app.fileManager.processFrontMatter(targetFile, (fm) => {
       var _a;
-      const deps = (_a = fm["blocked-by"]) != null ? _a : [];
+      const deps = (_a = fm[this.dependencyProperty]) != null ? _a : [];
       if (!Array.isArray(deps)) return;
-      fm["blocked-by"] = deps.filter((d) => {
+      fm[this.dependencyProperty] = deps.filter((d) => {
+        var _a2;
         const str = String(d);
         const cleaned = str.replace(/^\[\[/, "").replace(/\]\]$/, "");
-        return cleaned !== blockerBasename;
+        return ((_a2 = this.app.metadataCache.getFirstLinkpathDest(cleaned.split("|")[0], targetFile.path)) == null ? void 0 : _a2.path) !== edge.from.file.path;
       });
-      if (fm["blocked-by"].length === 0) {
-        delete fm["blocked-by"];
+      if (fm[this.dependencyProperty].length === 0) {
+        delete fm[this.dependencyProperty];
       }
     });
-    new import_obsidian2.Notice(`Removed dependency: ${blockerBasename} \u2192 ${edge.to.label}`);
+    new import_obsidian4.Notice(`Removed dependency: ${blockerBasename} \u2192 ${edge.to.label}`);
   }
   /**
    * Render arrow handles (→○) on the right edge of each bar.
@@ -1921,6 +2713,11 @@ var ArrowRenderer = class {
       this.handleGroup.appendChild(handle);
     }
   }
+  /** Change editing affordances without replacing the dependency paths. */
+  setLocked(locked) {
+    this.locked = locked;
+    this.handleGroup.style.display = locked ? "none" : "";
+  }
   /** Get the arrow handle elements for ArrowDragManager to attach events to. */
   get handles() {
     return Array.from(this.handleGroup.querySelectorAll(".sabidurian-arrow-handle"));
@@ -1936,10 +2733,13 @@ var ArrowRenderer = class {
 };
 
 // src/interaction/ArrowDragManager.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 var SVG_NS6 = "http://www.w3.org/2000/svg";
 var ArrowDragManager = class {
   constructor(svg, app) {
+    this.dependencyProperty = "blocked-by";
+    this.locked = false;
+    this.connect = null;
     this.entries = [];
     this.getRowY = () => 0;
     this.isDragging = false;
@@ -1959,16 +2759,21 @@ var ArrowDragManager = class {
         this.highlightDropTarget(target, true);
       }
     };
-    this.onMouseUp = (e) => {
+    this.onMouseUp = async (e) => {
       if (!this.isDragging) return;
       const svgRect = this.svg.getBoundingClientRect();
       const localX = e.clientX - svgRect.left;
       const localY = e.clientY - svgRect.top;
       const target = this.findBarAtPoint(localX, localY);
-      if (target && target !== this.sourceEntry && this.sourceEntry) {
-        this.createDependency(this.sourceEntry, target);
-      }
+      const source = this.sourceEntry;
       this.resetDrag();
+      if (target && target !== source && source) {
+        try {
+          await this.createDependency(source, target);
+        } catch (error) {
+          new import_obsidian5.Notice(`Failed to add dependency: ${String(error)}`);
+        }
+      }
     };
     this.app = app;
     this.svg = svg;
@@ -1990,6 +2795,7 @@ var ArrowDragManager = class {
       const entry = byPath.get(filePath);
       if (!entry) continue;
       handle.addEventListener("mousedown", (e) => {
+        if (this.locked) return;
         if (e.button !== 0) return;
         e.preventDefault();
         e.stopPropagation();
@@ -2051,22 +2857,27 @@ var ArrowDragManager = class {
    */
   async createDependency(source, target) {
     var _a;
-    const wikilink = `[[${source.file.basename}]]`;
+    if (this.locked || target.locked) return;
+    if (this.connect) {
+      await this.connect(source, target);
+      return;
+    }
+    const wikilink = `[[${source.file.path.replace(/\.md$/, "")}]]`;
     await this.app.fileManager.processFrontMatter(target.file, (fm) => {
       var _a2;
-      let deps = (_a2 = fm["blocked-by"]) != null ? _a2 : [];
+      let deps = (_a2 = fm[this.dependencyProperty]) != null ? _a2 : [];
       if (!Array.isArray(deps)) deps = [];
       const exists = deps.some((d) => {
         const str = String(d);
         const cleaned = str.replace(/^\[\[/, "").replace(/\]\]$/, "");
-        return cleaned === source.file.basename;
+        return cleaned === source.file.path.replace(/\.md$/, "");
       });
       if (!exists) {
         deps.push(wikilink);
-        fm["blocked-by"] = deps;
+        fm[this.dependencyProperty] = deps;
       }
     });
-    new import_obsidian3.Notice(`Added dependency: ${source.label} \u2192 ${target.label}`);
+    new import_obsidian5.Notice(`Added dependency: ${source.label} \u2192 ${target.label}`);
     (_a = this.onConnectComplete) == null ? void 0 : _a.call(this);
   }
   resetDrag() {
@@ -2082,6 +2893,10 @@ var ArrowDragManager = class {
   setConnectCompleteCallback(cb) {
     this.onConnectComplete = cb;
   }
+  setLocked(locked) {
+    this.locked = locked;
+    if (locked) this.resetDrag();
+  }
   destroy() {
     document.removeEventListener("mousemove", this.onMouseMove);
     document.removeEventListener("mouseup", this.onMouseUp);
@@ -2090,17 +2905,17 @@ var ArrowDragManager = class {
 };
 
 // src/interaction/ContextMenuManager.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 
 // src/utils/confirmModal.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 function confirmAction(app, title, message) {
   return new Promise((resolve) => {
     const modal = new ConfirmModal(app, title, message, resolve);
     modal.open();
   });
 }
-var ConfirmModal = class extends import_obsidian4.Modal {
+var ConfirmModal = class extends import_obsidian6.Modal {
   constructor(app, title, message, resolve) {
     super(app);
     this.resolved = false;
@@ -2138,9 +2953,10 @@ var ConfirmModal = class extends import_obsidian4.Modal {
 };
 
 // src/interaction/ContextMenuManager.ts
-var DependencyPicker = class extends import_obsidian5.FuzzySuggestModal {
-  constructor(app, target, items, onDone) {
+var DependencyPicker = class extends import_obsidian7.FuzzySuggestModal {
+  constructor(app, target, items, onDone, dependencyProperty = "blocked-by") {
     super(app);
+    this.dependencyProperty = dependencyProperty;
     this.target = target;
     this.items = items;
     this.onDone = onDone;
@@ -2153,25 +2969,29 @@ var DependencyPicker = class extends import_obsidian5.FuzzySuggestModal {
     return item.label;
   }
   async onChooseItem(blocker) {
-    const wikilink = `[[${blocker.file.basename}]]`;
+    const wikilink = `[[${blocker.file.path.replace(/\.md$/, "")}]]`;
     await this.app.fileManager.processFrontMatter(this.target.file, (fm) => {
-      const existing = fm["blocked-by"];
+      const existing = fm[this.dependencyProperty];
       if (Array.isArray(existing)) {
         if (!existing.includes(wikilink)) {
           existing.push(wikilink);
         }
       } else if (existing) {
-        fm["blocked-by"] = [String(existing), wikilink];
+        fm[this.dependencyProperty] = [String(existing), wikilink];
       } else {
-        fm["blocked-by"] = [wikilink];
+        fm[this.dependencyProperty] = [wikilink];
       }
     });
-    new import_obsidian5.Notice(`Added dependency: "${this.target.label}" blocked by "${blocker.label}"`);
+    new import_obsidian7.Notice(`Added dependency: "${this.target.label}" blocked by "${blocker.label}"`);
     this.onDone();
   }
 };
 var ContextMenuManager = class {
   constructor(svg, app, axis, scale) {
+    this.detachListeners = [];
+    this.dependencyProperty = "blocked-by";
+    this.viewLocked = false;
+    this.inspect = null;
     this.entries = [];
     this.getRowY = () => 0;
     // Callbacks
@@ -2192,13 +3012,13 @@ var ContextMenuManager = class {
     const groups = this.svg.querySelectorAll(".sabidurian-bar-group");
     groups.forEach((group, idx) => {
       if (idx >= entries.length) return;
-      group.addEventListener("contextmenu", (e) => {
+      this.listen(group, (e) => {
         e.preventDefault();
         e.stopPropagation();
         this.showBarMenu(entries[idx], e);
       });
     });
-    this.svg.addEventListener("contextmenu", (e) => {
+    this.listen(this.svg, (e) => {
       if (e.target.closest(".sabidurian-bar-group")) return;
       if (e.target.closest(".sabidurian-group-header")) return;
       if (e.target.closest(".sabidurian-arrow-group")) return;
@@ -2208,7 +3028,7 @@ var ContextMenuManager = class {
   }
   // ── Bar context menu ──
   showBarMenu(entry, e) {
-    const menu = new import_obsidian5.Menu();
+    const menu = new import_obsidian7.Menu();
     menu.addItem(
       (item) => item.setTitle("Open").setIcon("file-text").onClick(() => {
         this.app.workspace.getLeaf(false).openFile(entry.file);
@@ -2231,12 +3051,12 @@ var ContextMenuManager = class {
       })
     );
     menu.addItem(
-      (item) => item.setTitle("Duplicate").setIcon("copy").onClick(() => {
+      (item) => item.setTitle("Duplicate").setIcon("copy").setDisabled(this.viewLocked || entry.locked).onClick(() => {
         this.duplicateEntry(entry);
       })
     );
     menu.addItem(
-      (item) => item.setTitle("Delete").setIcon("trash-2").onClick(() => {
+      (item) => item.setTitle("Delete").setIcon("trash-2").setDisabled(this.viewLocked || entry.locked).onClick(() => {
         this.deleteEntry(entry);
       })
     );
@@ -2277,12 +3097,12 @@ var ContextMenuManager = class {
   }
   // ── Empty area context menu ──
   showEmptyAreaMenu(e) {
-    const menu = new import_obsidian5.Menu();
+    const menu = new import_obsidian7.Menu();
     menu.addItem(
       (item) => item.setTitle("Create entry here").setIcon("plus").onClick(() => {
         var _a;
         const svgRect = this.svg.getBoundingClientRect();
-        const localX = e.clientX - svgRect.left + this.svg.parentElement.scrollLeft;
+        const localX = e.clientX - svgRect.left;
         const clickYear = this.axis.pixelToYear(localX);
         const unitDuration = this.scale.unitDurationYears;
         (_a = this.onCreateEntry) == null ? void 0 : _a.call(this, clickYear, clickYear + unitDuration);
@@ -2311,9 +3131,13 @@ var ContextMenuManager = class {
   }
   // ── Actions ──
   async editDates(entry) {
+    if (this.inspect) {
+      this.inspect(entry);
+      return;
+    }
     const startStr = formatSabidurianDate(entry.start);
     const endStr = entry.end ? formatSabidurianDate(entry.end) : "";
-    new import_obsidian5.Notice(
+    new import_obsidian7.Notice(
       `${entry.label}
 Start: ${startStr}
 End: ${endStr || "(none)"}
@@ -2325,6 +3149,7 @@ Open the note to edit dates directly.`,
   }
   async duplicateEntry(entry) {
     var _a, _b;
+    if (this.viewLocked || entry.locked) return;
     try {
       const originalContent = await this.app.vault.read(entry.file);
       const folder = (_b = (_a = entry.file.parent) == null ? void 0 : _a.path) != null ? _b : "";
@@ -2337,42 +3162,53 @@ Open the note to edit dates directly.`,
       }
       const newPath = folder ? `${folder}/${newName}.md` : `${newName}.md`;
       await this.app.vault.create(newPath, originalContent);
-      new import_obsidian5.Notice(`Duplicated "${baseName}" \u2192 "${newName}"`);
+      new import_obsidian7.Notice(`Duplicated "${baseName}" \u2192 "${newName}"`);
     } catch (err) {
-      new import_obsidian5.Notice(`Failed to duplicate: ${err}`);
+      new import_obsidian7.Notice(`Failed to duplicate: ${err}`);
     }
   }
   async deleteEntry(entry) {
+    if (this.viewLocked || entry.locked) return;
     const confirmed = await confirmAction(this.app, "Delete entry", `Delete "${entry.label}"? This will move the file to trash.`);
-    if (!confirmed) return;
+    if (!confirmed || this.viewLocked || entry.locked) return;
     try {
       await this.app.vault.trash(entry.file, true);
-      new import_obsidian5.Notice(`Deleted "${entry.label}"`);
+      new import_obsidian7.Notice(`Deleted "${entry.label}"`);
     } catch (err) {
-      new import_obsidian5.Notice(`Failed to delete: ${err}`);
+      new import_obsidian7.Notice(`Failed to delete: ${err}`);
     }
   }
   addDependency(entry) {
+    if (this.inspect) {
+      this.inspect(entry);
+      return;
+    }
+    if (this.viewLocked || entry.locked) return;
     const otherEntries = this.entries.filter((e) => e.file.path !== entry.file.path);
     if (otherEntries.length === 0) {
-      new import_obsidian5.Notice("No other entries to create a dependency with.");
+      new import_obsidian7.Notice("No other entries to create a dependency with.");
       return;
     }
     new DependencyPicker(this.app, entry, otherEntries, () => {
       var _a;
       (_a = this.onRefresh) == null ? void 0 : _a.call(this);
-    }).open();
+    }, this.dependencyProperty).open();
   }
   async removeAllDependencies(entry) {
     var _a;
+    if (this.inspect) {
+      this.inspect(entry);
+      return;
+    }
+    if (this.viewLocked || entry.locked) return;
     await this.app.fileManager.processFrontMatter(entry.file, (fm) => {
-      delete fm["blocked-by"];
+      delete fm[this.dependencyProperty];
     });
-    new import_obsidian5.Notice(`Removed all dependencies from "${entry.label}"`);
+    new import_obsidian7.Notice(`Removed all dependencies from "${entry.label}"`);
     (_a = this.onRefresh) == null ? void 0 : _a.call(this);
   }
   async changeColor(entry) {
-    new import_obsidian5.Notice(
+    new import_obsidian7.Notice(
       `Color is determined by the "Color by" property in view options.
 Open the note to change its value.`,
       5e3
@@ -2402,10 +3238,15 @@ Open the note to change its value.`,
     this.onRefresh = cb;
   }
   destroy() {
+    for (const detach of this.detachListeners.splice(0)) detach();
     this.onCreateEntry = null;
     this.onScrollToToday = null;
     this.onChangeScale = null;
     this.onRefresh = null;
+  }
+  listen(target, handler) {
+    target.addEventListener("contextmenu", handler);
+    this.detachListeners.push(() => target.removeEventListener("contextmenu", handler));
   }
 };
 
@@ -2422,6 +3263,16 @@ var KeyboardManager = class {
     this.onDeleteEntry = null;
     this.onRefresh = null;
     this.onMeasureToggle = null;
+    this.onOpenEntry = null;
+    this.focusFrame = null;
+    this.boundMouseHandler = (e) => {
+      if (this.isInteractiveTarget(e.target)) return;
+      if (this.focusFrame !== null) cancelAnimationFrame(this.focusFrame);
+      this.focusFrame = requestAnimationFrame(() => {
+        this.focusFrame = null;
+        this.container.focus();
+      });
+    };
     this.app = app;
     this.container = container;
     this.selectionManager = selectionManager;
@@ -2434,16 +3285,19 @@ var KeyboardManager = class {
     this.container.setAttribute("tabindex", "0");
     this.container.style.outline = "none";
     this.container.addEventListener("keydown", this.boundKeyHandler);
-    this.container.addEventListener("mousedown", (e) => {
-      const tag = e.target.tagName;
-      if (tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA" || tag === "OPTION") return;
-      requestAnimationFrame(() => this.container.focus());
-    }, true);
+    this.container.addEventListener("mousedown", this.boundMouseHandler, true);
+  }
+  /** Leave native and custom controls in charge of their own activation and focus. */
+  isInteractiveTarget(target) {
+    var _a;
+    return !!((_a = target == null ? void 0 : target.closest) == null ? void 0 : _a.call(
+      target,
+      'button, a, input, select, textarea, option, [role="button"], [role="link"], [contenteditable]:not([contenteditable="false"])'
+    ));
   }
   onKeyDown(e) {
     var _a, _b;
-    const tag = e.target.tagName;
-    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+    if (e.defaultPrevented || this.isInteractiveTarget(e.target)) return;
     switch (e.key) {
       case "ArrowRight":
         e.preventDefault();
@@ -2565,6 +3419,10 @@ var KeyboardManager = class {
   openSelected() {
     const entry = this.selectionManager.getSelectedEntry();
     if (!entry) return;
+    if (this.onOpenEntry) {
+      this.onOpenEntry(entry);
+      return;
+    }
     this.app.workspace.getLeaf(false).openFile(entry.file);
   }
   /** Delete the selected entry (with confirmation). */
@@ -2613,13 +3471,21 @@ var KeyboardManager = class {
   setMeasureToggleCallback(cb) {
     this.onMeasureToggle = cb;
   }
+  /** Timeline can open its inspector; Sequence retains the original note action. */
+  setOpenEntryCallback(cb) {
+    this.onOpenEntry = cb;
+  }
   destroy() {
+    if (this.focusFrame !== null) cancelAnimationFrame(this.focusFrame);
+    this.focusFrame = null;
+    this.container.removeEventListener("mousedown", this.boundMouseHandler, true);
     this.container.removeEventListener("keydown", this.boundKeyHandler);
     this.onScrollToToday = null;
     this.onChangeScale = null;
     this.onDeleteEntry = null;
     this.onRefresh = null;
     this.onMeasureToggle = null;
+    this.onOpenEntry = null;
   }
 };
 
@@ -2751,8 +3617,2093 @@ var SelectionManager = class {
   }
 };
 
-// src/interaction/TouchManager.ts
+// src/utils/debounce.ts
+function debounce(fn, delay) {
+  let timer = null;
+  let rafId = null;
+  const debounced = (...args) => {
+    if (delay === 0) {
+      if (rafId != null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        fn(...args);
+      });
+    } else {
+      if (timer != null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        fn(...args);
+      }, delay);
+    }
+  };
+  return debounced;
+}
+function isTouchDevice() {
+  return "ontouchstart" in window || navigator.maxTouchPoints > 0 || // @ts-ignore — vendor prefix
+  navigator.msMaxTouchPoints > 0;
+}
+function isMobileViewport() {
+  return window.innerWidth < 768;
+}
+
+// src/model/ViewportCuller.ts
+var H_BUFFER = 200;
+var V_BUFFER = 100;
+var ViewportCuller = class {
+  constructor(getRowY) {
+    this.getRowY = getRowY;
+  }
+  /**
+   * Return only the entries whose bars/points fall within the visible
+   * scroll region (with buffer).
+   */
+  cull(entries, bounds) {
+    const left = bounds.scrollLeft - H_BUFFER;
+    const right = bounds.scrollLeft + bounds.viewportWidth + H_BUFFER;
+    const top = bounds.scrollTop - V_BUFFER;
+    const bottom = bounds.scrollTop + bounds.viewportHeight + V_BUFFER;
+    return entries.filter((entry) => {
+      var _a, _b;
+      const entryLeft = entry.x;
+      const entryRight = entry.x + Math.max(entry.width, labelWidth((_a = entry.displayLabel) != null ? _a : entry.label) + (((_b = entry.icon) == null ? void 0 : _b.kind) === "image" ? 20 : 0) + (entry.isPoint ? 30 : 8));
+      if (entryRight < left || entryLeft > right) return false;
+      const rowY = this.getRowY(entry.row);
+      if (rowY + ROW_HEIGHT < top || rowY > bottom) return false;
+      return true;
+    });
+  }
+  /**
+   * Quick check: did the viewport change enough to warrant a re-cull?
+   * Returns true if scroll moved more than half the buffer distance.
+   */
+  static shouldRecull(prev, curr) {
+    if (!prev) return true;
+    const dh = Math.abs(curr.scrollLeft - prev.scrollLeft);
+    const dv = Math.abs(curr.scrollTop - prev.scrollTop);
+    return dh > H_BUFFER / 2 || dv > V_BUFFER / 2;
+  }
+};
+
+// src/utils/measureDuration.ts
+var unit = (count, name) => `${count.toLocaleString()} ${name}${count === 1 ? "" : "s"}`;
+function formatMeasureDuration(a, b) {
+  const start = axisToWallMs(Math.min(a, b));
+  const end = axisToWallMs(Math.max(a, b));
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    return `~${unit(Math.round(Math.abs(b - a)), "year")}`;
+  }
+  const first = new Date(start), last = new Date(end);
+  const afterMonths = (months2) => {
+    const monthStart = new Date(utcMs(first.getUTCFullYear(), first.getUTCMonth() + months2));
+    const year = monthStart.getUTCFullYear(), month = monthStart.getUTCMonth();
+    const days = new Date(utcMs(year, month + 1, 0)).getUTCDate();
+    return utcMs(year, month, Math.min(first.getUTCDate(), days), first.getUTCHours(), first.getUTCMinutes(), first.getUTCSeconds()) + first.getUTCMilliseconds();
+  };
+  let months = (last.getUTCFullYear() - first.getUTCFullYear()) * 12 + last.getUTCMonth() - first.getUTCMonth();
+  if (afterMonths(months) > end) months--;
+  const parts = [];
+  const add = (count, name) => {
+    if (count && parts.length < 2) parts.push(unit(count, name));
+  };
+  add(Math.floor(months / 12), "year");
+  add(months % 12, "month");
+  let seconds = Math.round((end - afterMonths(months)) / 1e3);
+  for (const [name, size] of [["day", 86400], ["hour", 3600], ["minute", 60], ["second", 1]]) {
+    add(Math.floor(seconds / size), name);
+    seconds %= size;
+  }
+  return parts.join(", ") || "0 seconds";
+}
+
+// src/interaction/MeasureManager.ts
 var SVG_NS7 = "http://www.w3.org/2000/svg";
+var MeasureManager = class {
+  constructor(svg, containerEl, axis, hideTaskTooltip = () => {
+  }) {
+    this.svg = svg;
+    this.containerEl = containerEl;
+    this.axis = axis;
+    this.hideTaskTooltip = hideTaskTooltip;
+    this.state = "idle";
+    this.pointA = null;
+    this.pointB = null;
+    this.overlayEl = null;
+    this.markerA = null;
+    this.markerB = null;
+    this.spanLine = null;
+    this.gesture = null;
+    this.suppressClick = false;
+    /** When true, shows "N positions" instead of time units. */
+    this.sequenceMode = false;
+    this.onMouseDown = (e) => {
+      this.suppressClick = false;
+      if (!this.isActive || e.button !== 0) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      this.gesture = { start: this.pointAt(e), clientX: e.clientX, clientY: e.clientY, dragging: false };
+    };
+    this.onMouseMove = (e) => {
+      const gesture = this.gesture;
+      if (!gesture) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (!gesture.dragging) {
+        if (Math.hypot(e.clientX - gesture.clientX, e.clientY - gesture.clientY) < 4) return;
+        gesture.dragging = true;
+        if (this.state !== "awaiting-b") {
+          this.clearVisuals();
+          this.pointA = gesture.start;
+          this.renderMarker(this.pointA, "a");
+        }
+        this.state = "awaiting-b";
+      }
+      this.pointB = this.pointAt(e);
+      this.renderMarker(this.pointB, "b");
+      this.renderMeasurement();
+    };
+    this.onMouseUp = (e) => {
+      if (!this.gesture || e.button !== 0) return;
+      this.onMouseMove(e);
+      const dragged = this.gesture.dragging;
+      this.gesture = null;
+      if (dragged) {
+        this.state = "displaying";
+        this.suppressClick = true;
+      }
+    };
+    this.onBlur = () => {
+      if (this.gesture) this.deactivate();
+    };
+    var _a;
+    svg.addEventListener("mousedown", this.onMouseDown, true);
+    svg.ownerDocument.addEventListener("mousemove", this.onMouseMove, true);
+    svg.ownerDocument.addEventListener("mouseup", this.onMouseUp, true);
+    (_a = svg.ownerDocument.defaultView) == null ? void 0 : _a.addEventListener("blur", this.onBlur);
+  }
+  activate() {
+    this.clearVisuals();
+    this.suppressClick = false;
+    this.hideTaskTooltip();
+    this.state = "awaiting-a";
+    this.containerEl.classList.add("sabidurian-measure-mode");
+  }
+  deactivate() {
+    var _a;
+    if (this.gesture) this.suppressClick = true;
+    this.gesture = null;
+    this.state = "idle";
+    this.containerEl.classList.remove("sabidurian-measure-mode");
+    (_a = this.containerEl.querySelector(".sabidurian-measure-btn")) == null ? void 0 : _a.classList.remove("sabidurian-measure-active");
+    this.clearVisuals();
+  }
+  get isActive() {
+    return this.state !== "idle";
+  }
+  handleClick(e) {
+    if (this.suppressClick) {
+      this.suppressClick = false;
+      return true;
+    }
+    if (this.state === "idle") return false;
+    const point = this.pointAt(e);
+    if (this.state === "awaiting-a") {
+      this.pointA = point;
+      this.renderMarker(this.pointA, "a");
+      this.state = "awaiting-b";
+      return true;
+    }
+    if (this.state === "awaiting-b") {
+      this.pointB = point;
+      this.renderMarker(this.pointB, "b");
+      this.renderMeasurement();
+      this.state = "displaying";
+      return true;
+    }
+    if (this.state === "displaying") {
+      this.deactivate();
+      return true;
+    }
+    return false;
+  }
+  pointAt(e) {
+    const rect = this.svg.getBoundingClientRect();
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    return { year: this.axis.pixelToYear(x), x, y };
+  }
+  handleKeydown(e) {
+    if (e.key === "Escape" && this.state !== "idle") {
+      this.deactivate();
+      return true;
+    }
+    return false;
+  }
+  renderMarker(point, id) {
+    var _a;
+    const line = (_a = id === "a" ? this.markerA : this.markerB) != null ? _a : this.svg.ownerDocument.createElementNS(SVG_NS7, "line");
+    line.setAttribute("x1", `${point.x}`);
+    line.setAttribute("x2", `${point.x}`);
+    line.setAttribute("y1", "0");
+    const svgHeight = this.svg.getAttribute("height") || `${this.svg.clientHeight}`;
+    line.setAttribute("y2", svgHeight);
+    line.classList.add("sabidurian-measure-marker");
+    this.svg.appendChild(line);
+    if (id === "a") this.markerA = line;
+    else this.markerB = line;
+  }
+  renderMeasurement() {
+    var _a, _b, _c;
+    if (!this.pointA || !this.pointB) return;
+    const [earlier, later] = this.pointA.year < this.pointB.year ? [this.pointA, this.pointB] : [this.pointB, this.pointA];
+    const midY = Math.min(earlier.y, later.y) - 16;
+    const spanLine = (_a = this.spanLine) != null ? _a : this.svg.ownerDocument.createElementNS(SVG_NS7, "line");
+    spanLine.setAttribute("x1", `${earlier.x}`);
+    spanLine.setAttribute("x2", `${later.x}`);
+    spanLine.setAttribute("y1", `${midY}`);
+    spanLine.setAttribute("y2", `${midY}`);
+    spanLine.classList.add("sabidurian-measure-span");
+    this.svg.appendChild(spanLine);
+    this.spanLine = spanLine;
+    const durationText = this.sequenceMode ? this.computeSequenceDistance(earlier.year, later.year) : formatMeasureDuration(earlier.year, later.year);
+    const overlay = (_b = this.overlayEl) != null ? _b : this.svg.ownerDocument.createElement("div");
+    overlay.classList.add("sabidurian-measure-label");
+    overlay.textContent = durationText;
+    const midX = (earlier.x + later.x) / 2;
+    const timelineBody = this.containerEl.querySelector(".sabidurian-timeline-body");
+    const labelTop = Math.max(((_c = timelineBody == null ? void 0 : timelineBody.scrollTop) != null ? _c : 0) + 4, midY - 28);
+    overlay.style.left = `${midX}px`;
+    overlay.style.top = `${labelTop}px`;
+    if (timelineBody) {
+      timelineBody.appendChild(overlay);
+    } else {
+      this.containerEl.appendChild(overlay);
+    }
+    this.overlayEl = overlay;
+  }
+  computeSequenceDistance(posA, posB) {
+    const diff = Math.abs(Math.round(posB) - Math.round(posA));
+    return `${diff} position${diff !== 1 ? "s" : ""}`;
+  }
+  clearVisuals() {
+    var _a, _b, _c, _d;
+    (_a = this.markerA) == null ? void 0 : _a.remove();
+    (_b = this.markerB) == null ? void 0 : _b.remove();
+    (_c = this.spanLine) == null ? void 0 : _c.remove();
+    (_d = this.overlayEl) == null ? void 0 : _d.remove();
+    this.markerA = this.markerB = this.spanLine = null;
+    this.overlayEl = null;
+    this.pointA = this.pointB = null;
+  }
+  destroy() {
+    var _a;
+    this.deactivate();
+    this.svg.removeEventListener("mousedown", this.onMouseDown, true);
+    this.svg.ownerDocument.removeEventListener("mousemove", this.onMouseMove, true);
+    this.svg.ownerDocument.removeEventListener("mouseup", this.onMouseUp, true);
+    (_a = this.svg.ownerDocument.defaultView) == null ? void 0 : _a.removeEventListener("blur", this.onBlur);
+  }
+};
+
+// src/renderer/MarkerRenderer.ts
+var SVG_NS8 = "http://www.w3.org/2000/svg";
+var MarkerRenderer = class {
+  constructor() {
+    this.markerGroup = null;
+  }
+  render(svg, markers, axis, canvasHeight) {
+    this.destroy();
+    const markerGroup = document.createElementNS(SVG_NS8, "g");
+    markerGroup.classList.add("sabidurian-markers-group");
+    for (const marker of markers) {
+      if (!marker.enabled) continue;
+      if (marker.date) {
+        const parsed = parseSabidurianDate(marker.date);
+        if (!parsed) continue;
+        const year = sabidurianDateToYear(parsed);
+        const x = axis.yearToPixel(year);
+        const line = document.createElementNS(SVG_NS8, "line");
+        line.setAttribute("x1", `${x}`);
+        line.setAttribute("x2", `${x}`);
+        line.setAttribute("y1", "0");
+        line.setAttribute("y2", `${canvasHeight}`);
+        line.style.stroke = marker.color;
+        line.classList.add("sabidurian-marker-line");
+        markerGroup.appendChild(line);
+        const text = document.createElementNS(SVG_NS8, "text");
+        text.setAttribute("x", `${x + 4}`);
+        text.setAttribute("y", "12");
+        text.textContent = marker.label;
+        text.classList.add("sabidurian-marker-label");
+        text.style.fill = marker.color;
+        markerGroup.appendChild(text);
+      } else if (marker.start && marker.end) {
+        const startParsed = parseSabidurianDate(marker.start);
+        const endParsed = parseSabidurianDate(marker.end);
+        if (!startParsed || !endParsed) continue;
+        const x1 = axis.yearToPixel(sabidurianDateToYear(startParsed));
+        const x2 = axis.yearToPixel(sabidurianDateToYear(endParsed));
+        const rect = document.createElementNS(SVG_NS8, "rect");
+        rect.setAttribute("x", `${Math.min(x1, x2)}`);
+        rect.setAttribute("y", "0");
+        rect.setAttribute("width", `${Math.abs(x2 - x1)}`);
+        rect.setAttribute("height", `${canvasHeight}`);
+        rect.style.fill = marker.color;
+        rect.classList.add("sabidurian-marker-band");
+        markerGroup.appendChild(rect);
+        const text = document.createElementNS(SVG_NS8, "text");
+        text.setAttribute("x", `${Math.min(x1, x2) + 4}`);
+        text.setAttribute("y", "12");
+        text.textContent = marker.label;
+        text.classList.add("sabidurian-marker-label");
+        text.style.fill = marker.color;
+        markerGroup.appendChild(text);
+      }
+    }
+    const barsGroup = svg.querySelector(".sabidurian-bars-group");
+    if (barsGroup) {
+      svg.insertBefore(markerGroup, barsGroup);
+    } else {
+      svg.appendChild(markerGroup);
+    }
+    this.markerGroup = markerGroup;
+  }
+  destroy() {
+    var _a;
+    (_a = this.markerGroup) == null ? void 0 : _a.remove();
+    this.markerGroup = null;
+  }
+};
+
+// src/scale/scales/DayScale.ts
+var HOUR_IN_YEARS = 1 / 8760;
+var MINUTE_IN_MS = 60 * 1e3;
+function pickStepMinutes(rangeYears) {
+  const rangeHours = rangeYears * 8760;
+  if (rangeHours <= 12) return 15;
+  if (rangeHours <= 48) return 30;
+  if (rangeHours <= 7 * 24) return 60;
+  return 180;
+}
+var DayScale = {
+  id: "day",
+  label: "Hours",
+  unitDurationYears: HOUR_IN_YEARS,
+  supportsSubYear: true,
+  supportsBCE: false,
+  minColumnPx: 26,
+  writePrecision: "minute",
+  getColumnBoundaries(start, end, tickMinutes) {
+    const cols = [];
+    const stepMin = tickMinutes || pickStepMinutes(Math.max(end - start, 1e-5));
+    const stepMs = stepMin * MINUTE_IN_MS;
+    const startDate = fractionalYearToDate(start);
+    startDate.setUTCSeconds(0, 0);
+    startDate.setUTCMinutes(Math.floor(startDate.getUTCMinutes() / stepMin) * stepMin);
+    const endDate = fractionalYearToDate(end);
+    let cur = new Date(startDate);
+    while (cur <= endDate && cols.length < 1e4) {
+      const next = new Date(cur.getTime() + stepMs);
+      const colStart = dateToFractionalYear(cur);
+      const colEnd = dateToFractionalYear(next);
+      const h = cur.getUTCHours();
+      const m = cur.getUTCMinutes();
+      const hourLabel = `${h % 12 || 12} ${h < 12 ? "AM" : "PM"}`;
+      const mm = String(m).padStart(2, "0");
+      const label = stepMin >= 60 ? hourLabel : `:${mm}`;
+      const dayLabel = cur.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+      let tierLabel;
+      let isTierStart;
+      if (stepMin >= 60) {
+        tierLabel = dayLabel;
+        isTierStart = h === 0;
+      } else {
+        tierLabel = hourLabel;
+        isTierStart = m === 0;
+      }
+      cols.push({ start: colStart, end: colEnd, label, tierLabel, isTierStart, contextLabel: dayLabel });
+      cur = next;
+    }
+    return cols;
+  },
+  snapToUnit(year) {
+    const d = fractionalYearToDate(year);
+    d.setUTCSeconds(0, 0);
+    d.setUTCMinutes(Math.round(d.getUTCMinutes() / 15) * 15);
+    return dateToFractionalYear(d);
+  }
+};
+function fractionalYearToDate(fy) {
+  return new Date(axisToWallMs(fy));
+}
+function dateToFractionalYear(d) {
+  return wallMsToAxis(d.getTime());
+}
+registerScale(DayScale);
+
+// src/scale/scales/WeekScale.ts
+var WEEK_IN_YEARS = 7 / 365;
+var WeekScale = {
+  id: "week",
+  label: "Week",
+  unitDurationYears: WEEK_IN_YEARS,
+  supportsSubYear: true,
+  supportsBCE: false,
+  getColumnBoundaries(start, end) {
+    const cols = [];
+    const startDate = fractionalYearToDate2(start);
+    const dow = startDate.getUTCDay();
+    const diff = dow === 0 ? -6 : 1 - dow;
+    startDate.setUTCDate(startDate.getUTCDate() + diff);
+    startDate.setUTCHours(0, 0, 0, 0);
+    const endDate = fractionalYearToDate2(end);
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let cur = new Date(startDate);
+    while (cur <= endDate && cols.length < 1e3) {
+      const next = new Date(cur);
+      next.setUTCDate(next.getUTCDate() + 7);
+      const colStart = dateToFracYear(cur);
+      const colEnd = dateToFracYear(next);
+      const label = `${months[cur.getUTCMonth()]} ${cur.getUTCDate()}`;
+      const tierLabel = `${months[cur.getUTCMonth()]} ${cur.getUTCFullYear()}`;
+      const isTierStart = cur.getUTCDate() <= 7;
+      cols.push({ start: colStart, end: colEnd, label, tierLabel, isTierStart });
+      cur = next;
+    }
+    return cols;
+  },
+  snapToUnit(year) {
+    const d = fractionalYearToDate2(year);
+    const dow = d.getUTCDay();
+    const diff = dow === 0 ? -6 : 1 - dow;
+    d.setUTCDate(d.getUTCDate() + diff);
+    return dateToFracYear(d);
+  }
+};
+function fractionalYearToDate2(fy) {
+  return new Date(axisToWallMs(fy));
+}
+function dateToFracYear(d) {
+  return wallMsToAxis(d.getTime());
+}
+registerScale(WeekScale);
+
+// src/scale/scales/MonthScale.ts
+var MonthScale = {
+  id: "month",
+  label: "Month",
+  unitDurationYears: 1 / 12,
+  supportsSubYear: true,
+  supportsBCE: false,
+  getColumnBoundaries(start, end) {
+    const cols = [];
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let year = Math.floor(start);
+    let month = new Date(axisToWallMs(start)).getUTCMonth();
+    while (cols.length < 1e3) {
+      const colStart = wallMsToAxis(utcMs(year, month));
+      const nextMonth = month + 1;
+      const nextYear = nextMonth >= 12 ? year + 1 : year;
+      const nm = nextMonth % 12;
+      const colEnd = wallMsToAxis(utcMs(nextYear, nm));
+      if (colStart > end) break;
+      cols.push({
+        start: colStart,
+        end: colEnd,
+        label: months[month],
+        tierLabel: `${year}`,
+        isTierStart: month === 0
+      });
+      year = nextYear;
+      month = nm;
+    }
+    return cols;
+  },
+  snapToUnit(year) {
+    const y = Math.floor(year);
+    const m = Math.round((year - y) * 12);
+    return y + m / 12;
+  }
+};
+registerScale(MonthScale);
+
+// src/scale/scales/QuarterScale.ts
+var QuarterScale = {
+  id: "quarter",
+  label: "Quarter",
+  unitDurationYears: 0.25,
+  supportsSubYear: true,
+  supportsBCE: false,
+  getColumnBoundaries(start, end) {
+    const cols = [];
+    let year = Math.floor(start);
+    let q = Math.max(0, Math.floor((start - year) * 4));
+    while (cols.length < 500) {
+      const colStart = year + q * 0.25;
+      const colEnd = year + (q + 1) * 0.25;
+      if (colStart > end) break;
+      cols.push({
+        start: colStart,
+        end: colEnd,
+        label: `Q${q + 1}`,
+        tierLabel: `${year}`,
+        isTierStart: q === 0
+      });
+      q++;
+      if (q >= 4) {
+        q = 0;
+        year++;
+      }
+    }
+    return cols;
+  },
+  snapToUnit(year) {
+    const y = Math.floor(year);
+    const q = Math.round((year - y) * 4);
+    return y + q * 0.25;
+  }
+};
+registerScale(QuarterScale);
+
+// src/scale/scales/YearScale.ts
+var YearScale = {
+  id: "year",
+  label: "Year",
+  unitDurationYears: 1,
+  supportsSubYear: false,
+  supportsBCE: true,
+  getColumnBoundaries(start, end) {
+    const cols = [];
+    let year = Math.floor(start);
+    while (year <= Math.ceil(end) && cols.length < 500) {
+      cols.push({
+        start: year,
+        end: year + 1,
+        label: formatYear(year),
+        tierLabel: `${Math.floor(year / 10) * 10}s`,
+        isTierStart: year % 10 === 0
+      });
+      year++;
+    }
+    return cols;
+  },
+  snapToUnit(year) {
+    return Math.round(year);
+  }
+};
+registerScale(YearScale);
+
+// src/scale/scales/DecadeScale.ts
+var DecadeScale = {
+  id: "decade",
+  label: "Decade",
+  unitDurationYears: 10,
+  supportsSubYear: false,
+  supportsBCE: true,
+  getColumnBoundaries(start, end) {
+    const cols = [];
+    let decade = Math.floor(start / 10) * 10;
+    while (decade <= Math.ceil(end) && cols.length < 500) {
+      const label = `${formatYear(decade)}s`;
+      const centuryStart = Math.floor(decade / 100) * 100;
+      const tierLabel = decade <= 0 ? `${Math.ceil((1 - centuryStart) / 100)} cent. BCE` : `${Math.floor(centuryStart / 100) + 1}th cent.`;
+      cols.push({
+        start: decade,
+        end: decade + 10,
+        label,
+        tierLabel,
+        isTierStart: decade % 100 === 0
+      });
+      decade += 10;
+    }
+    return cols;
+  },
+  snapToUnit(year) {
+    return Math.round(year / 10) * 10;
+  }
+};
+var CenturyScale = {
+  id: "century",
+  label: "Century",
+  unitDurationYears: 100,
+  supportsSubYear: false,
+  supportsBCE: true,
+  getColumnBoundaries(start, end) {
+    const cols = [];
+    let century = Math.floor(start / 100) * 100;
+    while (century <= Math.ceil(end) && cols.length < 200) {
+      let label;
+      if (century <= 0) {
+        label = `${Math.ceil((1 - century) / 100)} cent. BCE`;
+      } else {
+        const num = Math.floor(century / 100) + 1;
+        label = `${num}th cent.`;
+      }
+      const milStart = Math.floor(century / 1e3) * 1e3;
+      const tierLabel = century <= 0 ? `${Math.ceil((1 - milStart) / 1e3)} mil. BCE` : `${Math.floor(milStart / 1e3) + 1} millennium`;
+      cols.push({
+        start: century,
+        end: century + 100,
+        label,
+        tierLabel,
+        isTierStart: century % 1e3 === 0
+      });
+      century += 100;
+    }
+    return cols;
+  },
+  snapToUnit(year) {
+    return Math.round(year / 100) * 100;
+  }
+};
+var MillenniumScale = {
+  id: "millennium",
+  label: "Millennium",
+  unitDurationYears: 1e3,
+  supportsSubYear: false,
+  supportsBCE: true,
+  getColumnBoundaries(start, end) {
+    const cols = [];
+    let mil = Math.floor(start / 1e3) * 1e3;
+    while (mil <= Math.ceil(end) && cols.length < 100) {
+      let label;
+      if (mil <= 0) {
+        label = `${Math.ceil((1 - mil) / 1e3)} mil. BCE`;
+      } else {
+        const num = Math.floor(mil / 1e3) + 1;
+        label = `${num} millennium`;
+      }
+      cols.push({
+        start: mil,
+        end: mil + 1e3,
+        label
+      });
+      mil += 1e3;
+    }
+    return cols;
+  },
+  snapToUnit(year) {
+    return Math.round(year / 1e3) * 1e3;
+  }
+};
+registerScale(DecadeScale);
+registerScale(CenturyScale);
+registerScale(MillenniumScale);
+
+// src/viewOptions.ts
+function getViewOptions(config) {
+  const scaleOptions = { auto: "Auto" };
+  for (const scale of SCALES) {
+    scaleOptions[scale.id] = scale.label;
+  }
+  return [
+    { type: "property", key: "labelProp", displayName: "Task label (property or formula)" },
+    { type: "dropdown", key: "snapMinutes", displayName: "Edit snap (minutes)", default: "5", options: { "1": "1", "5": "5", "15": "15", "30": "30", "60": "60" } },
+    { type: "dropdown", key: "tickMinutes", displayName: "Hourly visual ticks", default: "15", options: { "15": "15 minutes", "30": "30 minutes", "60": "1 hour" } },
+    { type: "text", key: "timeZone", displayName: "Time zone (IANA)", placeholder: "America/Denver" },
+    { type: "text", key: "taskFolder", displayName: "Task folder", placeholder: "Tasks" },
+    { type: "toggle", key: "oneTaskPerRow", displayName: "One task per row", default: false },
+    { type: "toggle", key: "locked", displayName: "Lock scheduling", default: true },
+    // ── Property selectors ──
+    {
+      type: "property",
+      key: "startDateProp",
+      displayName: "Start date",
+      placeholder: "Select property\u2026"
+    },
+    {
+      type: "property",
+      key: "endDateProp",
+      displayName: "End date",
+      placeholder: "Select property\u2026"
+    },
+    {
+      type: "property",
+      key: "colorProp",
+      displayName: "Color by",
+      placeholder: "Select property\u2026"
+    },
+    {
+      type: "property",
+      key: "dependencyProp",
+      displayName: "Dependency property",
+      placeholder: "e.g. blocked-by"
+    },
+    {
+      type: "property",
+      key: "earliestStartProp",
+      displayName: "Earliest start",
+      placeholder: "Uncertainty: earliest possible start"
+    },
+    {
+      type: "property",
+      key: "latestEndProp",
+      displayName: "Latest end",
+      placeholder: "Uncertainty: latest possible end"
+    },
+    // ── Bar property badges ──
+    {
+      type: "property",
+      key: "barDisplayProp1",
+      displayName: "Bar property 1",
+      placeholder: "Property shown on bars"
+    },
+    {
+      type: "property",
+      key: "barDisplayProp2",
+      displayName: "Bar property 2",
+      placeholder: "Second property on bars"
+    },
+    {
+      type: "property",
+      key: "barDisplayProp3",
+      displayName: "Bar property 3",
+      placeholder: "Third property on bars"
+    },
+    // ── Scale ──
+    {
+      type: "dropdown",
+      key: "scaleId",
+      displayName: "Default scale",
+      default: "auto",
+      options: scaleOptions
+    },
+    // ── Initial scroll position (on view open) ──
+    {
+      type: "dropdown",
+      key: "initialScroll",
+      displayName: "Open view at",
+      default: "today",
+      options: {
+        today: "Today",
+        start: "Start of data",
+        end: "End of data"
+      }
+    },
+    { type: "text", key: "focusDate", displayName: "Open near datetime", placeholder: "2026-11-26T12:00" },
+    // ── Focus filter ──
+    {
+      type: "text",
+      key: "focusTag",
+      displayName: "Focus tag",
+      placeholder: "e.g. project \u2014 unfocused items are greyed out"
+    },
+    // ── Display toggles ──
+    {
+      type: "toggle",
+      key: "showTable",
+      displayName: "Show side table",
+      default: true
+    },
+    {
+      type: "toggle",
+      key: "showArrows",
+      displayName: "Show dependencies",
+      default: true
+    },
+    {
+      type: "toggle",
+      key: "showToday",
+      displayName: "Show today marker",
+      default: true
+    },
+    // ── Historical group ──
+    {
+      type: "group",
+      displayName: "Historical",
+      items: [
+        {
+          type: "toggle",
+          key: "enableBCE",
+          displayName: "Enable BCE dates",
+          default: true
+        }
+      ]
+    }
+  ];
+}
+
+// src/SabidurianView.ts
+var VIEW_PADDING_RATIO = 0.1;
+var MIN_TIMELINE_HEIGHT = 200;
+var CULLING_THRESHOLD = 150;
+var SYSTEM_PROP_PREFIXES = ["file.", "formula."];
+var SabidurianView = class extends import_obsidian8.BasesView {
+  constructor(controller, scrollEl, plugin) {
+    var _a;
+    super(controller);
+    this.type = "sabidurian-timeline";
+    this.rootEl = null;
+    // Renderers
+    this.headerRenderer = null;
+    this.timelineRenderer = null;
+    this.barRenderer = null;
+    this.taskEdges = null;
+    this.sideTableRenderer = null;
+    this.dragManager = null;
+    this.arrowRenderer = null;
+    this.arrowDragManager = null;
+    this.contextMenuManager = null;
+    this.keyboardManager = null;
+    this.selectionManager = null;
+    this.touchManager = null;
+    this.groupHeaderRenderer = null;
+    this.measureManager = null;
+    this.markerRenderer = null;
+    this.layoutEngine = new LayoutEngine();
+    // Debounced re-render for rapid frontmatter changes (drag, touch)
+    this.debouncedRender = debounce(() => this.onDataUpdated(), 16);
+    // Axis & scale
+    this.axis = new NumericAxis(2025, 2026, 800);
+    this.currentScale = null;
+    // Parsed entries kept for hover sync
+    this.currentEntries = [];
+    this.currentGroups = [];
+    // Collapsed group state (persisted in config)
+    this.collapsedGroups = /* @__PURE__ */ new Set();
+    // ── Lock state (prevents drag/resize/create) ──
+    this._locked = true;
+    this.lockUpdateState = null;
+    this.timeZone = "UTC";
+    this.depPropName = "blocked-by";
+    this.scheduling = new Scheduling();
+    /** Set to true after the first successful render so initial-scroll logic only fires once. */
+    this._hasRendered = false;
+    this.pendingViewport = null;
+    this.restoreFrame = null;
+    // ── Viewport culling (Phase 11) ──
+    this.viewportCuller = null;
+    /** All entries after layout (row >= 0), before viewport filtering. */
+    this.allVisibleEntries = [];
+    /** Whether culling is active for the current dataset. */
+    this.cullingActive = false;
+    this.lastViewportBounds = null;
+    /** Debounced scroll handler for viewport-based re-render. */
+    this.debouncedViewportRender = debounce(() => this.renderVisibleBars(), 0);
+    /** Cached config references needed by renderVisibleBars. */
+    this._showArrows = true;
+    this._isGrouped = false;
+    this._startPropName = "start-date";
+    this._endPropName = "end-date";
+    this.refreshColors = () => this.onDataUpdated();
+    this.scrollEl = scrollEl;
+    this.plugin = plugin;
+    (_a = plugin.colorSubscribers) == null ? void 0 : _a.add(this.refreshColors);
+    this.renderSkeleton();
+  }
+  onDataUpdated() {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C;
+    if (this.lockUpdateState && !this.pendingViewport && ((_a = this.rootEl) == null ? void 0 : _a.isConnected) && this.timelineRenderer) {
+      const next = this.captureLockUpdateState();
+      if (next === this.lockUpdateState) {
+        const locked = this.config.get("locked");
+        this.applyLockState(locked != null ? locked : this.plugin.settings.lockOnMobile && isTouchDevice());
+        return;
+      }
+    }
+    this.lockUpdateState = null;
+    const previous = (_b = this.pendingViewport) != null ? _b : this.timelineRenderer ? {
+      year: this.axis.pixelToYear(this.timelineRenderer.element.scrollLeft),
+      top: this.timelineRenderer.element.scrollTop
+    } : null;
+    this.pendingViewport = previous;
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
+    (_c = this.taskEdges) == null ? void 0 : _c.destroy();
+    this.taskEdges = null;
+    (_d = this.dragManager) == null ? void 0 : _d.destroy();
+    this.dragManager = null;
+    (_e = this.arrowDragManager) == null ? void 0 : _e.destroy();
+    this.arrowDragManager = null;
+    (_f = this.contextMenuManager) == null ? void 0 : _f.destroy();
+    this.contextMenuManager = null;
+    (_g = this.keyboardManager) == null ? void 0 : _g.destroy();
+    this.keyboardManager = null;
+    (_h = this.selectionManager) == null ? void 0 : _h.destroy();
+    this.selectionManager = null;
+    (_i = this.touchManager) == null ? void 0 : _i.destroy();
+    this.touchManager = null;
+    (_j = this.measureManager) == null ? void 0 : _j.destroy();
+    this.measureManager = null;
+    (_k = this.markerRenderer) == null ? void 0 : _k.destroy();
+    this.markerRenderer = null;
+    (_l = this.arrowRenderer) == null ? void 0 : _l.destroy();
+    this.arrowRenderer = null;
+    (_m = this.groupHeaderRenderer) == null ? void 0 : _m.destroy();
+    this.groupHeaderRenderer = null;
+    (_n = this.barRenderer) == null ? void 0 : _n.destroy();
+    this.barRenderer = null;
+    (_o = this.sideTableRenderer) == null ? void 0 : _o.destroy();
+    this.sideTableRenderer = null;
+    if (this.rootEl) {
+      this.rootEl.remove();
+    }
+    this.scrollEl.querySelectorAll(":scope > .sabidurian-container").forEach((el) => el.remove());
+    this.rootEl = this.scrollEl.createDiv({ cls: "sabidurian-container" });
+    const entries = (_q = (_p = this.data) == null ? void 0 : _p.data) != null ? _q : [];
+    if (entries.length === 0) {
+      this.renderEmptyState();
+      return;
+    }
+    this.timeZone = String(this.config.get("timeZone") || Intl.DateTimeFormat().resolvedOptions().timeZone);
+    try {
+      this.scheduling = new Scheduling(Number(this.config.get("snapMinutes") || 5), this.timeZone);
+    } catch (error) {
+      this.renderEmptyState(String(error));
+      return;
+    }
+    this.layoutEngine.oneTaskPerRow = this.config.get("oneTaskPerRow") === true;
+    const startPropId = this.config.getAsPropertyId("startDateProp");
+    const endPropId = this.config.getAsPropertyId("endDateProp");
+    const colorPropId = this.config.getAsPropertyId("colorProp");
+    const earliestStartPropId = this.config.getAsPropertyId("earliestStartProp");
+    const latestEndPropId = this.config.getAsPropertyId("latestEndProp");
+    const startPropRaw = this.config.get("startDateProp");
+    const endPropRaw = this.config.get("endDateProp");
+    this._startPropName = startPropRaw ? startPropRaw.replace(/^note\./, "") : "start-date";
+    this._endPropName = endPropRaw ? endPropRaw.replace(/^note\./, "") : "end-date";
+    const depPropRaw = this.config.get("dependencyProp");
+    const depPropName = ((depPropRaw == null ? void 0 : depPropRaw.trim()) || this.plugin.settings.dependencyProperty || "blocked-by").replace(/^note\./, "");
+    this.depPropName = depPropName;
+    const enableBCE = (_r = this.config.get("enableBCE")) != null ? _r : true;
+    const groupedData = (_t = (_s = this.data) == null ? void 0 : _s.groupedData) != null ? _t : [];
+    const isGrouped = groupedData.length > 1 || groupedData.length === 1 && groupedData[0].hasKey();
+    const savedCollapsed = this.config.get("collapsedGroups");
+    if (savedCollapsed) {
+      this.collapsedGroups = new Set(savedCollapsed);
+    }
+    resetColorCache();
+    let sabidurianEntries;
+    let sabidurianGroups = [];
+    if (isGrouped) {
+      sabidurianGroups = [];
+      sabidurianEntries = [];
+      for (const group of groupedData) {
+        const groupName = group.hasKey() ? String(group.key) : "(No value)";
+        const parsed = this.parseEntries(group.entries, startPropId, endPropId, colorPropId, depPropName, enableBCE, earliestStartPropId, latestEndPropId);
+        for (const e of parsed) e.groupKey = groupName;
+        sabidurianEntries.push(...parsed);
+        sabidurianGroups.push({
+          name: groupName,
+          entries: parsed,
+          collapsed: this.collapsedGroups.has(groupName),
+          headerY: 0,
+          totalHeight: 0
+        });
+      }
+    } else {
+      sabidurianEntries = this.parseEntries(entries, startPropId, endPropId, colorPropId, depPropName, enableBCE, earliestStartPropId, latestEndPropId);
+    }
+    const order = this.config.get("groupOrder");
+    const manualOrder = Array.isArray(order) ? order.map(String) : [];
+    if (manualOrder[0]) sabidurianGroups.sort((a, b) => {
+      const rank = (name) => {
+        const i = manualOrder.indexOf(name);
+        return i < 0 ? manualOrder.length : i;
+      };
+      return rank(a.name) - rank(b.name);
+    });
+    this.currentEntries = sabidurianEntries;
+    this.currentGroups = sabidurianGroups;
+    if (sabidurianEntries.length === 0) {
+      this.renderEmptyState("No entries have valid dates. Configure the Start date property above.");
+      return;
+    }
+    if (sabidurianEntries.length > this.plugin.settings.maxEntries) {
+      new import_obsidian8.Notice(
+        `Time & Line: ${sabidurianEntries.length} entries exceed the ${this.plugin.settings.maxEntries} limit. Performance may degrade.`,
+        8e3
+      );
+    }
+    const initialScroll = (_u = this.config.get("initialScroll")) != null ? _u : "today";
+    const { viewStart, viewEnd, range } = this.computeViewBounds(
+      sabidurianEntries,
+      initialScroll === "today"
+    );
+    const containerWidth = this.rootEl.clientWidth || 800;
+    let savedScaleId = this.config.get("scaleId");
+    if (savedScaleId === "hour") savedScaleId = "day";
+    this.currentScale = savedScaleId && savedScaleId !== "auto" ? (_v = SCALES.find((s) => s.id === savedScaleId)) != null ? _v : autoSelectScale(range, containerWidth) : autoSelectScale(range, containerWidth);
+    const columns = this.currentScale.getColumnBoundaries(viewStart, viewEnd, Number(this.config.get("tickMinutes") || 15));
+    const MAX_CANVAS_WIDTH = 32e3;
+    const minColPx = (_w = this.currentScale.minColumnPx) != null ? _w : 80;
+    const densityWidth = Math.min(MAX_CANVAS_WIDTH, columns.length * minColPx);
+    const canvasWidth = Math.max(containerWidth, densityWidth);
+    this.axis.setView(this.currentScale.id === "month" && columns.length ? columns[0].start : viewStart, this.currentScale.id === "month" && columns.length ? columns[columns.length - 1].end : viewEnd, canvasWidth);
+    const configLocked = this.config.get("locked");
+    const autoLock = this.plugin.settings.lockOnMobile && isTouchDevice();
+    this._locked = configLocked != null ? configLocked : autoLock;
+    this.renderControls(sabidurianEntries.length);
+    const bodyContainerEl = this.rootEl.createDiv({ cls: "sabidurian-body-container" });
+    const headerContainerEl = bodyContainerEl.createDiv({ cls: "sabidurian-header-container" });
+    const isMobile = isMobileViewport();
+    const showTable = isMobile ? false : (_x = this.config.get("showTable")) != null ? _x : true;
+    const savedTableWidth = this.config.get("tableWidth");
+    const tableColumns = this.getTableColumns(startPropId, endPropId);
+    if (showTable) {
+      const tableHeaderSpacer = headerContainerEl.createDiv({ cls: "sabidurian-table-header-spacer" });
+      tableHeaderSpacer.style.width = `${savedTableWidth != null ? savedTableWidth : 220}px`;
+      tableHeaderSpacer.style.flexShrink = "0";
+    }
+    const timelineHeaderEl = headerContainerEl.createDiv({ cls: "sabidurian-timeline-header-wrap" });
+    this.headerRenderer = new HeaderRenderer(timelineHeaderEl);
+    this.headerRenderer.render(columns, this.axis);
+    const contentEl = bodyContainerEl.createDiv({ cls: "sabidurian-content-row" });
+    let canvasHeight;
+    let visibleEntries;
+    if (isGrouped) {
+      const totalHeight = this.layoutEngine.layoutGrouped(sabidurianGroups, this.axis);
+      canvasHeight = Math.max(MIN_TIMELINE_HEIGHT, totalHeight);
+      visibleEntries = sabidurianEntries.filter((e) => e.row >= 0);
+    } else {
+      const totalHeight = this.layoutEngine.layout(sabidurianEntries, this.axis);
+      canvasHeight = Math.max(MIN_TIMELINE_HEIGHT, totalHeight);
+      visibleEntries = sabidurianEntries;
+    }
+    if (showTable) {
+      this.sideTableRenderer = new SideTableRenderer(
+        contentEl,
+        this.plugin.app,
+        savedTableWidth
+      );
+      this.sideTableRenderer.propertyColors = (_y = this.plugin.settings.propertyColors) != null ? _y : {};
+      if (isGrouped) {
+        this.sideTableRenderer.renderGrouped(
+          sabidurianGroups,
+          sabidurianEntries,
+          tableColumns,
+          (row) => this.layoutEngine.getRowY(row)
+        );
+        this.sideTableRenderer.setGroupToggleCallback((groupName) => {
+          this.toggleGroup(groupName);
+        });
+      } else {
+        this.sideTableRenderer.render(
+          sabidurianEntries,
+          tableColumns,
+          (row) => this.layoutEngine.getRowY(row)
+        );
+      }
+      this.sideTableRenderer.setWidthChangeCallback((w) => {
+        this.config.set("tableWidth", w);
+        const spacer = headerContainerEl.querySelector(".sabidurian-table-header-spacer");
+        if (spacer) spacer.style.width = `${w}px`;
+      });
+      this.sideTableRenderer.setRowHoverCallback((idx) => {
+        this.highlightBar(idx);
+      });
+    }
+    const showToday = (_z = this.config.get("showToday")) != null ? _z : true;
+    this.timelineRenderer = new TimelineRenderer(contentEl);
+    this.timelineRenderer.render(columns, this.axis, canvasHeight, showToday);
+    this._showArrows = (_A = this.config.get("showArrows")) != null ? _A : true;
+    this._isGrouped = isGrouped;
+    this.allVisibleEntries = visibleEntries;
+    this.cullingActive = visibleEntries.length > CULLING_THRESHOLD;
+    this.lastViewportBounds = null;
+    this.viewportCuller = new ViewportCuller((row) => this.layoutEngine.getRowY(row));
+    this.barRenderer = new BarRenderer(
+      this.timelineRenderer.svgElement,
+      this.plugin.app,
+      this.rootEl
+    );
+    this.barRenderer.setAxis(this.axis);
+    this.barRenderer.propertyColors = (_B = this.plugin.settings.propertyColors) != null ? _B : {};
+    this.barRenderer.inspect = (entry) => this.inspectTask(entry);
+    this.barRenderer.setDatePropNames(this._startPropName, this._endPropName);
+    const barDisplayProps = [];
+    for (const key of ["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"]) {
+      const val = this.config.get(key);
+      if (val) {
+        barDisplayProps.push(val.replace(/^note\./, ""));
+      }
+    }
+    this.barRenderer.setDisplayProps(
+      barDisplayProps,
+      this.plugin.settings.barPropertyMinWidth,
+      this.plugin.settings.showBarProperties
+    );
+    const focusTagRaw = ((_C = this.config.get("focusTag")) == null ? void 0 : _C.trim()) || null;
+    this.barRenderer.setFocusTag(focusTagRaw ? focusTagRaw.replace(/^#/, "") : null);
+    if (isGrouped) {
+      this.groupHeaderRenderer = new GroupHeaderRenderer(
+        this.timelineRenderer.svgElement
+      );
+      this.groupHeaderRenderer.render(sabidurianGroups, canvasWidth);
+      this.groupHeaderRenderer.setToggleCallback((groupName) => {
+        this.toggleGroup(groupName);
+      });
+    }
+    if (this._showArrows) {
+      this.detectCycles(sabidurianEntries);
+    }
+    this.renderVisibleBars();
+    this.timelineRenderer.raiseTodayMarker();
+    this.taskEdges = new TaskEdgeNavigation(
+      this.timelineRenderer.element,
+      this.timelineRenderer.overlayHost,
+      this.allVisibleEntries,
+      (row) => this.layoutEngine.getRowY(row),
+      (entry, boundary) => this.jumpToTaskBoundary(entry, boundary)
+    );
+    const timelineBody = this.timelineRenderer.element;
+    timelineBody.addEventListener("scroll", () => {
+      var _a2, _b2;
+      (_a2 = this.headerRenderer) == null ? void 0 : _a2.setScrollLeft(timelineBody.scrollLeft);
+      (_b2 = this.groupHeaderRenderer) == null ? void 0 : _b2.setScrollLeft(timelineBody.scrollLeft);
+      if (this.cullingActive) {
+        this.debouncedViewportRender();
+      }
+    });
+    if (this.sideTableRenderer) {
+      const tableBody = this.sideTableRenderer.scrollBody;
+      timelineBody.addEventListener("scroll", () => {
+        tableBody.scrollTop = timelineBody.scrollTop;
+      });
+      tableBody.addEventListener("scroll", () => {
+        timelineBody.scrollTop = tableBody.scrollTop;
+      });
+    }
+    if (previous) {
+      this.restoreFrame = requestAnimationFrame(() => {
+        var _a2, _b2, _c2;
+        if (((_a2 = this.timelineRenderer) == null ? void 0 : _a2.element) !== timelineBody) return;
+        timelineBody.scrollLeft = this.axis.yearToPixel(previous.year);
+        timelineBody.scrollTop = previous.top;
+        (_b2 = this.headerRenderer) == null ? void 0 : _b2.setScrollLeft(timelineBody.scrollLeft);
+        (_c2 = this.groupHeaderRenderer) == null ? void 0 : _c2.setScrollLeft(timelineBody.scrollLeft);
+        if (this.sideTableRenderer) {
+          this.sideTableRenderer.scrollBody.scrollTop = previous.top;
+        }
+        this.pendingViewport = null;
+        this.restoreFrame = null;
+        if (this.cullingActive) {
+          this.renderVisibleBars();
+        }
+      });
+    } else if (!this._hasRendered) {
+      this.restoreFrame = requestAnimationFrame(() => {
+        this.applyInitialScroll();
+        this.restoreFrame = null;
+      });
+    }
+    this._hasRendered = true;
+  }
+  /**
+   * Apply the user's configured initial-scroll position on first render.
+   * Choices: 'today' (default), 'start', 'end'. If today is out of the
+   * computed view bounds, falls back to 'start'.
+   */
+  applyInitialScroll() {
+    var _a, _b, _c;
+    if (!this.timelineRenderer) return;
+    const mode = (_a = this.config.get("initialScroll")) != null ? _a : "today";
+    const body = this.timelineRenderer.element;
+    const focus = parseSabidurianDate(this.config.get("focusDate"), this.timeZone);
+    if (focus && mode !== "start") {
+      const focusYear = sabidurianDateToYear(focus);
+      body.scrollLeft = Math.max(0, this.axis.yearToPixel(focusYear));
+      if (!this.currentGroups.length) {
+        const first = this.currentEntries.filter((e) => e.row >= 0 && e.endYear > focusYear).sort((a, b) => a.row - b.row)[0];
+        if (first) body.scrollTop = Math.max(0, this.layoutEngine.getRowY(first.row) - 12);
+      }
+    } else if (mode === "start") {
+      body.scrollLeft = 0;
+    } else if (mode === "end") {
+      body.scrollLeft = Math.max(0, this.axis.yearToPixel(Math.max(...this.currentEntries.map((e) => e.endYear))) - body.clientWidth * 0.9);
+    } else {
+      const now = /* @__PURE__ */ new Date();
+      const y = now.getFullYear();
+      const start = new Date(y, 0, 1).getTime();
+      const end = new Date(y + 1, 0, 1).getTime();
+      const todayFrac = wallMsToAxis(instantToWallMs(now.getTime(), this.timeZone));
+      if (todayFrac < this.axis.viewStart || todayFrac > this.axis.viewEnd) {
+        body.scrollLeft = 0;
+      } else {
+        this.timelineRenderer.scrollToYear(this.axis, todayFrac);
+      }
+    }
+    (_b = this.headerRenderer) == null ? void 0 : _b.setScrollLeft(body.scrollLeft);
+    (_c = this.groupHeaderRenderer) == null ? void 0 : _c.setScrollLeft(body.scrollLeft);
+    if (this.sideTableRenderer) {
+      this.sideTableRenderer.scrollBody.scrollTop = body.scrollTop;
+    }
+    if (this.cullingActive) {
+      this.renderVisibleBars();
+    }
+  }
+  /**
+   * Render (or re-render) bars + arrows + interaction managers for the
+   * entries currently visible in the scroll viewport.
+   *
+   * When culling is inactive (small dataset), renders all entries.
+   * When culling is active, uses ViewportCuller to filter.
+   *
+   * This method can be called repeatedly on scroll without a full
+   * onDataUpdated cycle — it only touches bars, arrows, and interactions.
+   */
+  renderVisibleBars() {
+    var _a, _b, _c, _d, _e, _f, _g, _h;
+    if (!this.timelineRenderer || !this.barRenderer || !this.rootEl) return;
+    const timelineBody = this.timelineRenderer.element;
+    let entriesToRender;
+    if (this.cullingActive && this.viewportCuller) {
+      const bounds = {
+        scrollLeft: timelineBody.scrollLeft,
+        scrollTop: timelineBody.scrollTop,
+        viewportWidth: timelineBody.clientWidth,
+        viewportHeight: timelineBody.clientHeight
+      };
+      if (!ViewportCuller.shouldRecull(this.lastViewportBounds, bounds)) return;
+      this.lastViewportBounds = bounds;
+      entriesToRender = this.viewportCuller.cull(this.allVisibleEntries, bounds);
+    } else {
+      entriesToRender = this.allVisibleEntries;
+    }
+    (_a = this.dragManager) == null ? void 0 : _a.destroy();
+    this.dragManager = null;
+    (_b = this.arrowDragManager) == null ? void 0 : _b.destroy();
+    this.arrowDragManager = null;
+    (_c = this.contextMenuManager) == null ? void 0 : _c.destroy();
+    this.contextMenuManager = null;
+    (_d = this.keyboardManager) == null ? void 0 : _d.destroy();
+    this.keyboardManager = null;
+    (_e = this.selectionManager) == null ? void 0 : _e.destroy();
+    this.selectionManager = null;
+    (_f = this.touchManager) == null ? void 0 : _f.destroy();
+    this.touchManager = null;
+    (_g = this.arrowRenderer) == null ? void 0 : _g.destroy();
+    this.arrowRenderer = null;
+    const markers = this.plugin.settings.markers;
+    if (markers && markers.length > 0) {
+      if (!this.markerRenderer) {
+        this.markerRenderer = new MarkerRenderer();
+      }
+      const svgHeight = parseFloat(this.timelineRenderer.svgElement.getAttribute("height") || "0");
+      this.markerRenderer.render(
+        this.timelineRenderer.svgElement,
+        markers,
+        this.axis,
+        svgHeight
+      );
+    } else {
+      (_h = this.markerRenderer) == null ? void 0 : _h.destroy();
+    }
+    this.barRenderer.render(entriesToRender, (row) => this.layoutEngine.getRowY(row));
+    if (!this.measureManager && this.rootEl) {
+      this.measureManager = new MeasureManager(
+        this.timelineRenderer.svgElement,
+        this.rootEl,
+        this.axis,
+        () => {
+          var _a2;
+          return (_a2 = this.barRenderer) == null ? void 0 : _a2.hideTooltip();
+        }
+      );
+      this.timelineRenderer.svgElement.addEventListener("click", (e) => {
+        var _a2, _b2, _c2;
+        if ((_a2 = this.measureManager) == null ? void 0 : _a2.handleClick(e)) {
+          e.stopPropagation();
+          if (!this.measureManager.isActive) {
+            (_c2 = (_b2 = this.rootEl) == null ? void 0 : _b2.querySelector(".sabidurian-measure-btn")) == null ? void 0 : _c2.classList.remove("sabidurian-measure-active");
+          }
+        }
+      }, true);
+      this.rootEl.addEventListener("keydown", (e) => {
+        var _a2, _b2, _c2;
+        if ((_a2 = this.measureManager) == null ? void 0 : _a2.handleKeydown(e)) {
+          e.stopPropagation();
+          (_c2 = (_b2 = this.rootEl) == null ? void 0 : _b2.querySelector(".sabidurian-measure-btn")) == null ? void 0 : _c2.classList.remove("sabidurian-measure-active");
+        }
+      }, true);
+    }
+    if (this._showArrows) {
+      this.arrowRenderer = new ArrowRenderer(
+        this.timelineRenderer.svgElement,
+        this.plugin.app
+      );
+      this.arrowRenderer.dependencyProperty = this.depPropName;
+      this.arrowRenderer.locked = this._locked;
+      this.arrowRenderer.removeEdge = async (from, to) => this.changeDependency(from, to, false);
+      this.arrowRenderer.render(
+        entriesToRender,
+        (row) => this.layoutEngine.getRowY(row)
+      );
+      if (!isTouchDevice()) {
+        this.arrowDragManager = new ArrowDragManager(
+          this.timelineRenderer.svgElement,
+          this.plugin.app
+        );
+        this.arrowDragManager.dependencyProperty = this.depPropName;
+        this.arrowDragManager.setLocked(this._locked);
+        this.arrowDragManager.connect = async (from, to) => this.changeDependency(from, to, true);
+        this.arrowDragManager.attach(
+          this.arrowRenderer.handles,
+          entriesToRender,
+          (row) => this.layoutEngine.getRowY(row)
+        );
+        this.arrowDragManager.setConnectCompleteCallback(() => {
+          setTimeout(() => this.onDataUpdated(), 200);
+        });
+      }
+    }
+    if (!isTouchDevice()) {
+      this.dragManager = new DragManager(
+        this.timelineRenderer.svgElement,
+        this.timelineRenderer.element,
+        this.plugin.app,
+        this.axis,
+        this.currentScale
+      );
+      this.dragManager.scheduling = this.currentEntries.every((e) => e.startYear >= 1) ? this.scheduling : null;
+      this.dragManager.setLocked(this._locked);
+      this.dragManager.persist = (entry, start, end) => this.saveSchedule(entry, start, end);
+      this.dragManager.setDatePropNames(this._startPropName, this._endPropName);
+      this.dragManager.attachToBarGroups(
+        entriesToRender,
+        (row) => this.layoutEngine.getRowY(row)
+      );
+      this.dragManager.setDragCompleteCallback(() => {
+        setTimeout(() => this.onDataUpdated(), 200);
+      });
+      this.dragManager.setCreateCallback(async (startYear, endYear) => {
+        this.openNewTask(String(this.yearToDateStr(startYear)), String(this.yearToDateStr(endYear)));
+      });
+    }
+    this.selectionManager = new SelectionManager(this.timelineRenderer.svgElement);
+    this.selectionManager.attach(entriesToRender);
+    this.contextMenuManager = new ContextMenuManager(
+      this.timelineRenderer.svgElement,
+      this.plugin.app,
+      this.axis,
+      this.currentScale
+    );
+    this.contextMenuManager.inspect = (entry) => this.inspectTask(entry);
+    this.contextMenuManager.dependencyProperty = this.depPropName;
+    this.contextMenuManager.viewLocked = this._locked;
+    this.contextMenuManager.lockedProperty = this.plugin.settings.lockedProperty || "locked";
+    this.contextMenuManager.attach(
+      entriesToRender,
+      (row) => this.layoutEngine.getRowY(row)
+    );
+    this.contextMenuManager.setCreateCallback(async (startYear, endYear) => {
+      if (this._locked) return;
+      if (startYear >= 1) {
+        const range = this.scheduling.edit("create", { start: startYear, end: startYear }, startYear);
+        this.openNewTask(String(this.yearToDateStr(range.start)), String(this.yearToDateStr(range.end)));
+      } else this.openNewTask(String(this.yearToDateStr(startYear)), String(this.yearToDateStr(endYear)));
+    });
+    this.contextMenuManager.setScrollToTodayCallback(() => {
+      this.scrollToToday();
+    });
+    this.contextMenuManager.setChangeScaleCallback((scaleId) => {
+      this.config.set("scaleId", scaleId);
+      this.onDataUpdated();
+    });
+    this.contextMenuManager.setRefreshCallback(() => {
+      setTimeout(() => this.onDataUpdated(), 200);
+    });
+    this.keyboardManager = new KeyboardManager(
+      this.rootEl,
+      this.plugin.app,
+      this.selectionManager,
+      this.currentScale.id
+    );
+    this.keyboardManager.attach(this.allVisibleEntries);
+    this.keyboardManager.setOpenEntryCallback((entry) => this.inspectTask(entry));
+    this.keyboardManager.setScrollToTodayCallback(() => {
+      this.scrollToToday();
+    });
+    this.keyboardManager.setChangeScaleCallback((scaleId) => {
+      this.config.set("scaleId", scaleId);
+      this.onDataUpdated();
+    });
+    this.keyboardManager.setDeleteEntryCallback(async (entry) => {
+      if (this._locked || entry.locked) return;
+      const confirmed = await confirmAction(this.plugin.app, "Delete entry", `Delete "${entry.label}"? This will move the file to trash.`);
+      if (!confirmed) return;
+      try {
+        await this.plugin.app.vault.trash(entry.file, true);
+        new import_obsidian8.Notice(`Deleted "${entry.label}"`);
+      } catch (err) {
+        new import_obsidian8.Notice(`Failed to delete: ${err}`);
+      }
+    });
+    this.keyboardManager.setMeasureToggleCallback(() => {
+      var _a2, _b2;
+      const btn = (_a2 = this.rootEl) == null ? void 0 : _a2.querySelector(".sabidurian-measure-btn");
+      if ((_b2 = this.measureManager) == null ? void 0 : _b2.isActive) {
+        this.measureManager.deactivate();
+        btn == null ? void 0 : btn.classList.remove("sabidurian-measure-active");
+      } else if (this.measureManager) {
+        this.measureManager.activate();
+        btn == null ? void 0 : btn.classList.add("sabidurian-measure-active");
+      }
+    });
+    this.timelineRenderer.element.style.touchAction = "pan-x pan-y";
+    this.timelineRenderer.raiseTodayMarker();
+  }
+  /** Scroll the timeline to today's position. */
+  scrollToToday() {
+    var _a;
+    const now = /* @__PURE__ */ new Date();
+    const y = now.getFullYear();
+    const start = new Date(y, 0, 1).getTime();
+    const end = new Date(y + 1, 0, 1).getTime();
+    const todayFrac = wallMsToAxis(instantToWallMs(now.getTime(), this.timeZone));
+    (_a = this.timelineRenderer) == null ? void 0 : _a.scrollToYear(this.axis, todayFrac);
+  }
+  /** Toggle a group's collapsed state and re-render. */
+  toggleGroup(groupName) {
+    if (this.collapsedGroups.has(groupName)) {
+      this.collapsedGroups.delete(groupName);
+    } else {
+      this.collapsedGroups.add(groupName);
+    }
+    this.config.set("collapsedGroups", Array.from(this.collapsedGroups));
+    this.onDataUpdated();
+  }
+  /** Build table column definitions from visible properties. */
+  getTableColumns(startPropId, endPropId) {
+    var _a, _b, _c;
+    const columns = [];
+    const visibleProps = (_c = (_b = (_a = this.config).getOrder) == null ? void 0 : _b.call(_a)) != null ? _c : [];
+    for (const propId of visibleProps) {
+      if (SYSTEM_PROP_PREFIXES.some((p) => propId.startsWith(p))) continue;
+      if (propId === startPropId || propId === endPropId) continue;
+      const displayName = this.config.getDisplayName(propId);
+      columns.push({ key: displayName, propId });
+    }
+    return columns;
+  }
+  /** Highlight a bar by entry index (for hover sync from side table). */
+  highlightBar(entryIndex) {
+    var _a, _b;
+    const existing = (_a = this.timelineRenderer) == null ? void 0 : _a.svgElement.querySelectorAll(".sabidurian-bar-hover");
+    existing == null ? void 0 : existing.forEach((el) => el.classList.remove("sabidurian-bar-hover"));
+    if (entryIndex == null || entryIndex < 0) return;
+    const groups = (_b = this.timelineRenderer) == null ? void 0 : _b.svgElement.querySelectorAll(".sabidurian-bar-group");
+    if (groups && groups[entryIndex]) {
+      groups[entryIndex].classList.add("sabidurian-bar-hover");
+    }
+  }
+  parseEntries(entries, startPropId, endPropId, colorPropId, depPropName, enableBCE = true, earliestStartPropId, latestEndPropId) {
+    var _a, _b;
+    const result = [];
+    for (const entry of entries) {
+      const fm = (_b = (_a = this.plugin.app.metadataCache.getFileCache(entry.file)) == null ? void 0 : _a.frontmatter) != null ? _b : {};
+      const readValue = (id) => id ? id.startsWith("note.") ? fm[id.slice(5)] : entry.getValue(id) : null;
+      const startVal = readValue(startPropId);
+      let startDate = parseSabidurianDate(startVal, this.timeZone);
+      const endVal = readValue(endPropId);
+      let endDate = parseSabidurianDate(endVal, this.timeZone);
+      let earliestStart;
+      let latestEnd;
+      let earliestStartYear;
+      let latestEndYear;
+      if (earliestStartPropId) {
+        const esVal = entry.getValue(earliestStartPropId);
+        const esParsed = parseSabidurianDate(esVal);
+        if (esParsed) {
+          earliestStart = esParsed;
+          earliestStartYear = sabidurianDateToYear(esParsed);
+        }
+      }
+      if (latestEndPropId) {
+        const leVal = entry.getValue(latestEndPropId);
+        const leParsed = parseSabidurianDate(leVal);
+        if (leParsed) {
+          latestEnd = leParsed;
+          latestEndYear = sabidurianDateToYear(leParsed);
+        }
+      }
+      let fuzzyOnly = false;
+      if (!startDate && earliestStart) {
+        startDate = earliestStart;
+        fuzzyOnly = true;
+      }
+      if (!endDate && latestEnd) {
+        endDate = latestEnd;
+      }
+      if (!startDate) continue;
+      const file = entry.file;
+      if (!file) continue;
+      let startYear = sabidurianDateToYear(startDate);
+      let endYear = endDate ? sabidurianDateToYear(endDate) : startYear;
+      if (!enableBCE && (startYear < 1 || endYear < 1)) continue;
+      let effectiveStart = startDate;
+      let effectiveEnd = endDate;
+      if (endDate && endYear < startYear) {
+        const tmp = endYear;
+        endYear = startYear;
+        startYear = tmp;
+        effectiveStart = endDate;
+        effectiveEnd = startDate;
+      }
+      let isOngoing = false;
+      if (!endDate && startDate) {
+        const currentYear = wallMsToAxis(instantToWallMs(Date.now(), this.timeZone));
+        isOngoing = true;
+        endYear = currentYear;
+      }
+      const pointThreshold = 0;
+      const isPoint = !isOngoing && (!endDate || Math.abs(endYear - startYear) <= pointThreshold);
+      const colorVal = colorPropId ? entry.getValue(colorPropId) : null;
+      const colorStr = colorVal ? colorVal.toString() : "";
+      const color = getColorForValue(colorStr, colorPropId != null ? colorPropId : "", this.plugin.settings.propertyColors);
+      const properties = {};
+      if (this.allProperties) {
+        for (const propId of this.allProperties) {
+          const val = entry.getValue(propId);
+          if (val) {
+            const name = this.config.getDisplayName(propId);
+            properties[name] = val.toString();
+          }
+        }
+      }
+      const depVal = depPropName ? fm[depPropName] : null;
+      const dependencies = this.resolveDependencies(depVal);
+      if (earliestStartYear !== void 0 && earliestStartYear > startYear) {
+        earliestStartYear = startYear;
+      }
+      if (latestEndYear !== void 0 && latestEndYear < endYear) {
+        latestEndYear = endYear;
+      }
+      const lockedPropName = this.plugin.settings.lockedProperty || "locked";
+      const lockedVal = fm[lockedPropName];
+      const locked = lockedVal === true || lockedVal === "true" || String(lockedVal) === "true";
+      const labelId = this.config.getAsPropertyId("labelProp");
+      const labelValue = readValue(labelId);
+      const icon = resolveTaskIcon(fm.icon, this.plugin.app, file.path);
+      const label = iconLabel(labelValue == null || String(labelValue) === "null" || String(labelValue) === "" ? file.basename : String(labelValue), icon);
+      const orderedProps = ["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"].map((key) => String(this.config.get(key) || "")).filter(Boolean);
+      for (const id of orderedProps) {
+        const value = readValue(id);
+        properties[id.replace(/^note\./, "")] = value == null || String(value) === "null" ? "" : String(value);
+      }
+      result.push({
+        file,
+        label,
+        icon,
+        dateValues: { [this._startPropName]: fm[this._startPropName], [this._endPropName]: fm[this._endPropName] },
+        displayLabel: fullLabel(label, properties, orderedProps.map((id) => id.replace(/^note\./, ""))),
+        start: effectiveStart,
+        end: effectiveEnd,
+        startYear,
+        endYear,
+        isPoint,
+        isOngoing,
+        locked,
+        fuzzyOnly,
+        earliestStart,
+        latestEnd,
+        earliestStartYear,
+        latestEndYear,
+        color,
+        colorValue: colorStr,
+        row: 0,
+        x: 0,
+        width: 0,
+        dependencies,
+        properties
+      });
+    }
+    return result;
+  }
+  /**
+   * Resolve a `blocked-by` frontmatter value into an array of file paths.
+   * Accepts: array of wikilinks like ["[[Task A]]"], single wikilink, or string.
+   */
+  resolveDependencies(val) {
+    return [...new Set(dependencyLinks(val).map((path) => {
+      var _a;
+      return (_a = this.plugin.app.metadataCache.getFirstLinkpathDest(path, "")) == null ? void 0 : _a.path;
+    }).filter((path) => !!path))];
+  }
+  /**
+   * Detect cycles in the dependency graph and warn via Notice.
+   * Simple DFS-based cycle detection.
+   */
+  detectCycles(entries) {
+    const graph = /* @__PURE__ */ new Map();
+    for (const entry of entries) {
+      graph.set(entry.file.path, entry.dependencies);
+    }
+    const visited = /* @__PURE__ */ new Set();
+    const inStack = /* @__PURE__ */ new Set();
+    let hasCycle = false;
+    const dfs = (node) => {
+      var _a;
+      if (inStack.has(node)) {
+        hasCycle = true;
+        return;
+      }
+      if (visited.has(node)) return;
+      visited.add(node);
+      inStack.add(node);
+      for (const dep of (_a = graph.get(node)) != null ? _a : []) {
+        dfs(dep);
+        if (hasCycle) return;
+      }
+      inStack.delete(node);
+    };
+    for (const path of graph.keys()) {
+      dfs(path);
+      if (hasCycle) break;
+    }
+    if (hasCycle) {
+      new import_obsidian8.Notice(
+        "Time & Line: Circular dependency detected in blocked-by chain!",
+        8e3
+      );
+    }
+  }
+  computeViewBounds(entries, includeToday = false) {
+    var _a, _b;
+    let minYear = Infinity;
+    let maxYear = -Infinity;
+    for (const e of entries) {
+      const effStart = (_a = e.earliestStartYear) != null ? _a : e.startYear;
+      const effEnd = (_b = e.latestEndYear) != null ? _b : e.endYear;
+      if (effStart < minYear) minYear = effStart;
+      if (e.startYear > maxYear) maxYear = e.startYear;
+      if (effEnd < minYear) minYear = effEnd;
+      if (effEnd > maxYear) maxYear = effEnd;
+    }
+    if (includeToday && minYear !== Infinity) {
+      const now = /* @__PURE__ */ new Date();
+      const y = now.getFullYear();
+      const startMs = new Date(y, 0, 1).getTime();
+      const endMs = new Date(y + 1, 0, 1).getTime();
+      const todayFrac = y + (now.getTime() - startMs) / (endMs - startMs);
+      const dataRange = maxYear - minYear || 1;
+      const nearWindow = Math.max(dataRange, 1);
+      if (todayFrac < minYear && minYear - todayFrac <= nearWindow) {
+        minYear = todayFrac;
+      } else if (todayFrac > maxYear && todayFrac - maxYear <= nearWindow) {
+        maxYear = todayFrac;
+      }
+    }
+    const range = maxYear - minYear || 1;
+    const padding = range * VIEW_PADDING_RATIO;
+    return {
+      viewStart: minYear - padding,
+      viewEnd: maxYear + padding,
+      range
+    };
+  }
+  taskFields() {
+    const label = String(this.config.get("labelProp") || "note.Step");
+    return {
+      start: this._startPropName,
+      end: this._endPropName,
+      dependencies: this.depPropName,
+      label: label.startsWith("note.") ? label.slice(5) : "Step",
+      zone: this.timeZone,
+      locked: this.plugin.settings.lockedProperty || "locked",
+      folder: String(this.config.get("taskFolder") || "")
+    };
+  }
+  inspectTask(entry) {
+    if (entry.startYear < 1 || entry.fuzzyOnly || !entry.end) {
+      void this.plugin.app.workspace.getLeaf(false).openFile(entry.file);
+      return;
+    }
+    new TaskInspector(
+      this.plugin.app,
+      entry.file,
+      this.taskFields(),
+      this.plugin.history,
+      this._locked,
+      () => this.onDataUpdated(),
+      () => this.setLocked(false),
+      entry.label,
+      (file) => this.revealTask(file)
+    ).open();
+  }
+  revealTask(file) {
+    var _a;
+    let entry = this.currentEntries.find((e) => e.file.path === file.path);
+    if (!entry) {
+      void this.plugin.app.workspace.getLeaf(false).openFile(file);
+      return;
+    }
+    if (entry.row < 0 && entry.groupKey) {
+      this.collapsedGroups.delete(entry.groupKey);
+      this.config.set("collapsedGroups", [...this.collapsedGroups]);
+      this.onDataUpdated();
+      entry = (_a = this.currentEntries.find((e) => e.file.path === file.path)) != null ? _a : entry;
+    }
+    this.pendingViewport = { year: entry.startYear, top: Math.max(0, this.layoutEngine.getRowY(entry.row) - 12) };
+    this.onDataUpdated();
+    this.inspectTask(entry);
+  }
+  jumpToTaskBoundary(entry, boundary) {
+    var _a, _b, _c;
+    if (!this.timelineRenderer) return;
+    const body = this.timelineRenderer.element;
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
+    this.restoreFrame = null;
+    this.pendingViewport = null;
+    const inset = Math.min(48, body.clientWidth / 4);
+    const x = boundary === "start" ? entry.x - inset : entry.x + entry.width - body.clientWidth + inset;
+    body.scrollLeft = Math.max(0, Math.min(x, Math.max(0, body.scrollWidth - body.clientWidth)));
+    (_a = this.headerRenderer) == null ? void 0 : _a.setScrollLeft(body.scrollLeft);
+    (_b = this.groupHeaderRenderer) == null ? void 0 : _b.setScrollLeft(body.scrollLeft);
+    this.lastViewportBounds = null;
+    if (this.cullingActive) this.renderVisibleBars();
+    (_c = this.taskEdges) == null ? void 0 : _c.refresh();
+    const bar = [...this.timelineRenderer.svgElement.querySelectorAll(".sabidurian-bar-group")].find((el) => el.dataset.filePath === entry.file.path);
+    bar == null ? void 0 : bar.focus({ preventScroll: true });
+  }
+  async saveSchedule(entry, start, end) {
+    if (this._locked || entry.locked) return;
+    const values = {};
+    if (this.scheduling.changed(entry.startYear, start)) values[this._startPropName] = this.yearToDateStr(start, this.entryWritePrecision(entry, "start"));
+    if (!entry.isPoint && !entry.isOngoing && this.scheduling.changed(entry.endYear, end)) values[this._endPropName] = this.yearToDateStr(end, this.entryWritePrecision(entry, "end"));
+    try {
+      await this.plugin.history.patch(entry.file, values, entry.dateValues);
+    } catch (error) {
+      new import_obsidian8.Notice(String(error));
+    }
+  }
+  async changeDependency(from, to, add) {
+    var _a, _b;
+    if (this._locked || to.locked || from.file.path === to.file.path) return;
+    const fm = (_b = (_a = this.plugin.app.metadataCache.getFileCache(to.file)) == null ? void 0 : _a.frontmatter) != null ? _b : {};
+    const deps = dependencyLinks(fm[this.depPropName]);
+    const matches = (path) => {
+      var _a2;
+      return ((_a2 = this.plugin.app.metadataCache.getFirstLinkpathDest(path, to.file.path)) == null ? void 0 : _a2.path) === from.file.path;
+    };
+    const next = deps.filter((path) => !matches(path));
+    if (add) next.push(from.file.path.replace(/\.md$/, ""));
+    await this.plugin.history.patch(to.file, { [this.depPropName]: next.map((path) => `[[${path}]]`) }, { [this.depPropName]: fm[this.depPropName] });
+    this.onDataUpdated();
+  }
+  async createTask(name, start, end, properties = {}) {
+    var _a, _b;
+    if (this._locked) return;
+    const fields = this.taskFields();
+    const folder = fields.folder || ((_b = (_a = this.currentEntries[0]) == null ? void 0 : _a.file.parent) == null ? void 0 : _b.path) || "";
+    const safeName = name.replace(/[\\/:*?"<>|]/g, "-");
+    const prefix = `${folder ? folder + "/" : ""}${safeName}`;
+    let path = `${prefix}.md`, suffix = 2;
+    while (this.plugin.app.vault.getAbstractFileByPath(path)) path = `${prefix} ${suffix++}.md`;
+    const fm = { ...properties, [fields.label]: name, [fields.start]: start, [fields.end]: end };
+    const content = "---\n" + Object.entries(fm).map(([k, v]) => `${JSON.stringify(k)}: ${JSON.stringify(v)}`).join("\n") + "\n---\n";
+    const file = await this.plugin.app.vault.create(path, content);
+    this.plugin.history.recordCreation(file, content, (f) => this.plugin.app.vault.read(f), (f) => this.plugin.app.vault.trash(f, true));
+    this.onDataUpdated();
+  }
+  openNewTask(start, end) {
+    if (this._locked) return;
+    if (!/^\d{4}-\d{2}-\d{2}T/.test(start)) {
+      void this.createTask("New task", start, end != null ? end : start).catch((e) => new import_obsidian8.Notice(String(e)));
+      return;
+    }
+    const files = this.plugin.app.vault.getMarkdownFiles();
+    const values = (key) => [...new Set(files.map((f) => {
+      var _a, _b;
+      return (_b = (_a = this.plugin.app.metadataCache.getFileCache(f)) == null ? void 0 : _a.frontmatter) == null ? void 0 : _b[key];
+    }).filter(Boolean).map(String))];
+    const required = this.config.get("requiredNewTaskProps");
+    new NewTaskModal(this.plugin.app, this.timeZone, start, (name, begin, finish, properties) => this.createTask(name, begin, finish, properties), {
+      dishes: values("Dish"),
+      chefs: values("Active Chef"),
+      ovens: values("Oven Temp"),
+      required: Array.isArray(required) ? required.map(String) : [],
+      initialEnd: end
+    }).open();
+  }
+  renderControls(entryCount) {
+    var _a, _b, _c, _d;
+    if (!this.rootEl) return;
+    const controlsEl = this.rootEl.createDiv({ cls: "sabidurian-controls" });
+    controlsEl.createEl("span", {
+      cls: "sabidurian-controls-info",
+      text: `${entryCount} entries`
+    });
+    controlsEl.createSpan({ text: this.timeZone, cls: "sabidurian-zone" });
+    const find = controlsEl.createEl("button", { text: "Find task\u2026" });
+    find.onclick = () => new TaskPicker(this.plugin.app, this.currentEntries.map((e) => e.file), this.taskFields(), (file) => this.revealTask(file)).open();
+    const undo = controlsEl.createEl("button", { text: "Undo" });
+    undo.disabled = !this.plugin.history.canUndo;
+    undo.onclick = async () => {
+      try {
+        await this.plugin.history.undo();
+        this.onDataUpdated();
+      } catch (e) {
+        new import_obsidian8.Notice(String(e));
+      }
+    };
+    const create = controlsEl.createEl("button", { text: "New task", cls: "sabidurian-new-task-btn" });
+    create.disabled = this._locked;
+    create.onclick = () => {
+      const latest = Math.max(...this.currentEntries.map((e) => e.startYear));
+      this.openNewTask(String(this.yearToDateStr(latest, "minute")));
+    };
+    if (this.currentGroups.length) {
+      const expand = controlsEl.createEl("button", { text: "Expand groups" });
+      expand.onclick = () => {
+        this.config.set("collapsedGroups", []);
+        this.onDataUpdated();
+      };
+    }
+    const scaleControl = controlsEl.createSpan({ cls: "sabidurian-scale-control" });
+    const scaleSelect = scaleControl.createEl("select", { cls: "sabidurian-scale-select" });
+    for (const scale of SCALES) {
+      const opt = scaleSelect.createEl("option", { value: scale.id, text: scale.label });
+      if (this.currentScale && scale.id === this.currentScale.id) {
+        opt.selected = true;
+      }
+    }
+    scaleSelect.addEventListener("change", () => {
+      this.config.set("scaleId", scaleSelect.value);
+      this.onDataUpdated();
+    });
+    scaleSelect.setAttribute("aria-label", "Timeline scale");
+    scaleSelect.style.width = `calc(${(_b = (_a = this.currentScale) == null ? void 0 : _a.label.length) != null ? _b : 5}ch + 42px)`;
+    const todayBtn = controlsEl.createEl("button", {
+      cls: "sabidurian-today-btn",
+      text: "Today"
+    });
+    todayBtn.addEventListener("click", () => {
+      this.scrollToToday();
+    });
+    const showTableConfig = (_c = this.config.get("showTable")) != null ? _c : true;
+    const tableBtn = controlsEl.createEl("button", {
+      cls: "sabidurian-today-btn sabidurian-table-toggle-btn",
+      text: showTableConfig ? "Hide Table" : "Show Table"
+    });
+    tableBtn.addEventListener("click", () => {
+      this.config.set("showTable", !showTableConfig);
+      this.onDataUpdated();
+    });
+    const showArrows = (_d = this.config.get("showArrows")) != null ? _d : true;
+    const arrowsBtn = controlsEl.createEl("button", {
+      cls: "sabidurian-today-btn sabidurian-arrows-toggle-btn",
+      text: showArrows ? "Hide Arrows" : "Show Arrows"
+    });
+    arrowsBtn.addEventListener("click", () => {
+      this.config.set("showArrows", !showArrows);
+      this.onDataUpdated();
+    });
+    const lockBtn = controlsEl.createEl("button", {
+      cls: `sabidurian-today-btn sabidurian-lock-btn${this._locked ? " sabidurian-lock-active" : ""}`
+    });
+    const lockIconSpan = lockBtn.createSpan({ cls: "sabidurian-lock-icon" });
+    (0, import_obsidian8.setIcon)(lockIconSpan, this._locked ? "lock" : "unlock");
+    lockBtn.createSpan({ cls: "sabidurian-lock-label", text: this._locked ? "Locked" : "Editing" });
+    lockBtn.setAttribute("aria-pressed", String(this._locked));
+    lockBtn.addEventListener("click", () => this.setLocked(!this._locked));
+    const measureBtn = controlsEl.createEl("button", {
+      cls: "sabidurian-today-btn sabidurian-measure-btn",
+      attr: { "aria-label": "Measure distance" }
+    });
+    const measureIconSpan = measureBtn.createSpan({ cls: "sabidurian-lock-icon" });
+    (0, import_obsidian8.setIcon)(measureIconSpan, "ruler");
+    measureBtn.createSpan({ text: "Measure" });
+    measureBtn.addEventListener("click", () => {
+      var _a2;
+      if ((_a2 = this.measureManager) == null ? void 0 : _a2.isActive) {
+        this.measureManager.deactivate();
+        measureBtn.classList.remove("sabidurian-measure-active");
+      } else if (this.measureManager) {
+        this.measureManager.activate();
+        measureBtn.classList.add("sabidurian-measure-active");
+      }
+    });
+  }
+  captureLockUpdateState() {
+    var _a, _b, _c, _d;
+    const entries = [...(_b = (_a = this.data) == null ? void 0 : _a.data) != null ? _b : []];
+    const keys = getViewOptions(this.config).flatMap((option) => {
+      var _a2;
+      return (_a2 = option.items) != null ? _a2 : [option];
+    }).map((option) => option.key).filter((key) => key && key !== "locked");
+    keys.push("tableWidth", "collapsedGroups", "groupOrder", "requiredNewTaskProps");
+    const propertyIds = [.../* @__PURE__ */ new Set([
+      ...this.allProperties,
+      ...this.config.getOrder(),
+      ...keys.map((key) => this.config.get(key)).filter((value) => typeof value === "string" && /^(note|formula|file)\./.test(value))
+    ])];
+    const depProperty = String(this.config.get("dependencyProp") || this.plugin.settings.dependencyProperty || "blocked-by").replace(/^note\./, "");
+    return JSON.stringify({
+      options: keys.map((key) => [key, this.config.get(key)]),
+      properties: this.allProperties.map((id) => [id, this.config.getDisplayName(id)]),
+      order: this.config.getOrder(),
+      groups: ((_d = (_c = this.data) == null ? void 0 : _c.groupedData) != null ? _d : []).map((group) => [String(group.key), group.hasKey(), group.entries.map((entry) => entry.file.path)]),
+      // A saved .base file can rerun the query and replace entry objects even
+      // though every displayed value is unchanged. Compare their content.
+      rows: entries.map((entry) => {
+        var _a2;
+        const fm = (_a2 = this.plugin.app.metadataCache.getFileCache(entry.file)) == null ? void 0 : _a2.frontmatter;
+        return [
+          entry.file.path,
+          entry.file.basename,
+          fm,
+          this.resolveDependencies(fm == null ? void 0 : fm[depProperty]),
+          propertyIds.map((id) => {
+            const value = entry.getValue(id);
+            const date = value instanceof Date ? value : value == null ? void 0 : value.date;
+            return [id, value == null ? null : String(value), date instanceof Date ? date.getTime() : null];
+          })
+        ];
+      }),
+      settings: this.plugin.settings,
+      canUndo: this.plugin.history.canUndo
+    });
+  }
+  setLocked(locked) {
+    this.applyLockState(locked);
+    this.lockUpdateState = this.captureLockUpdateState();
+    this.config.set("locked", locked);
+  }
+  applyLockState(locked) {
+    var _a, _b, _c, _d, _e;
+    this._locked = locked;
+    (_a = this.dragManager) == null ? void 0 : _a.setLocked(locked);
+    (_b = this.arrowDragManager) == null ? void 0 : _b.setLocked(locked);
+    (_c = this.arrowRenderer) == null ? void 0 : _c.setLocked(locked);
+    if (this.contextMenuManager) this.contextMenuManager.viewLocked = locked;
+    const button = (_d = this.rootEl) == null ? void 0 : _d.querySelector(".sabidurian-lock-btn");
+    if (button) {
+      button.classList.toggle("sabidurian-lock-active", locked);
+      button.setAttribute("aria-pressed", String(locked));
+      const icon = button.querySelector(".sabidurian-lock-icon");
+      if (icon) (0, import_obsidian8.setIcon)(icon, locked ? "lock" : "unlock");
+      const label = button.querySelector(".sabidurian-lock-label");
+      if (label) label.textContent = locked ? "Locked" : "Editing";
+    }
+    const create = (_e = this.rootEl) == null ? void 0 : _e.querySelector(".sabidurian-new-task-btn");
+    if (create) create.disabled = locked;
+  }
+  renderSkeleton() {
+    this.scrollEl.querySelectorAll(":scope > .sabidurian-container").forEach((el) => el.remove());
+    this.rootEl = this.scrollEl.createDiv({ cls: "sabidurian-container" });
+    const skeleton = this.rootEl.createDiv({ cls: "sabidurian-skeleton" });
+    const widths = [65, 40, 80, 55, 45];
+    for (const w of widths) {
+      const bar = skeleton.createDiv({ cls: "sabidurian-skeleton-bar" });
+      bar.style.width = `${w}%`;
+    }
+  }
+  renderEmptyState(message) {
+    if (!this.rootEl) return;
+    const empty = this.rootEl.createDiv({ cls: "sabidurian-empty" });
+    empty.createDiv({ cls: "sabidurian-empty-icon", text: "\u{1F4C5}" });
+    empty.createEl("p", { text: message != null ? message : "No entries found." });
+    empty.createEl("p", {
+      text: "Add date properties to your notes and configure the Start date option above.",
+      cls: "sabidurian-hint"
+    });
+  }
+  /**
+   * Convert a fractional year to a YAML-friendly date string at the given
+   * precision. Precision defaults to the current scale's write precision
+   * (or 'day' if none is set).
+   */
+  yearToDateStr(fractionalYear, precision) {
+    var _a, _b;
+    const p = (_b = precision != null ? precision : (_a = this.currentScale) == null ? void 0 : _a.writePrecision) != null ? _b : "day";
+    return yearToYAMLString(fractionalYear, p, this.timeZone);
+  }
+  /**
+   * Precision to use when writing back drag-modified dates for a specific
+   * entry: the finer of the original date's precision and the current scale's
+   * write precision.
+   */
+  entryWritePrecision(entry, which) {
+    var _a, _b;
+    const date = which === "start" ? entry.start : entry.end;
+    const origPrecision = date ? getDatePrecision(date) : "day";
+    const scalePrecision = (_b = (_a = this.currentScale) == null ? void 0 : _a.writePrecision) != null ? _b : "day";
+    return maxPrecision(origPrecision, scalePrecision);
+  }
+  onunload() {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n;
+    (_a = this.measureManager) == null ? void 0 : _a.destroy();
+    this.measureManager = null;
+    (_b = this.taskEdges) == null ? void 0 : _b.destroy();
+    this.taskEdges = null;
+    (_c = this.plugin.colorSubscribers) == null ? void 0 : _c.delete(this.refreshColors);
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
+    (_d = this.dragManager) == null ? void 0 : _d.destroy();
+    this.dragManager = null;
+    (_e = this.arrowDragManager) == null ? void 0 : _e.destroy();
+    this.arrowDragManager = null;
+    (_f = this.contextMenuManager) == null ? void 0 : _f.destroy();
+    this.contextMenuManager = null;
+    (_g = this.keyboardManager) == null ? void 0 : _g.destroy();
+    this.keyboardManager = null;
+    (_h = this.selectionManager) == null ? void 0 : _h.destroy();
+    this.selectionManager = null;
+    (_i = this.touchManager) == null ? void 0 : _i.destroy();
+    this.touchManager = null;
+    (_j = this.arrowRenderer) == null ? void 0 : _j.destroy();
+    this.arrowRenderer = null;
+    (_k = this.groupHeaderRenderer) == null ? void 0 : _k.destroy();
+    this.groupHeaderRenderer = null;
+    (_l = this.barRenderer) == null ? void 0 : _l.destroy();
+    this.barRenderer = null;
+    (_m = this.sideTableRenderer) == null ? void 0 : _m.destroy();
+    this.sideTableRenderer = null;
+    (_n = this.rootEl) == null ? void 0 : _n.remove();
+    this.rootEl = null;
+  }
+};
+
+// src/SequenceView.ts
+var import_obsidian9 = require("obsidian");
+
+// src/scale/SequenceScale.ts
+function createSequenceScale(occupiedPositions, dense = false) {
+  let densePositions = null;
+  if (dense && occupiedPositions && occupiedPositions.length > 0) {
+    densePositions = [...new Set(occupiedPositions)].sort((a, b) => a - b);
+  }
+  return {
+    id: "sequence",
+    label: "Sequence",
+    unitDurationYears: 1,
+    // Each step = 1 unit in axis space
+    supportsSubYear: false,
+    supportsBCE: false,
+    getColumnBoundaries(start, end) {
+      const cols = [];
+      if (densePositions) {
+        for (let i = 0; i < densePositions.length; i++) {
+          const denseIdx = i + 1;
+          if (denseIdx + 1 < start) continue;
+          if (denseIdx > end) break;
+          cols.push({
+            start: denseIdx,
+            end: denseIdx + 1,
+            label: String(densePositions[i])
+            // Original order as label
+          });
+          if (cols.length > 500) break;
+        }
+      } else {
+        let step = Math.max(1, Math.floor(start));
+        const maxStep = Math.ceil(end);
+        while (step <= maxStep && cols.length < 500) {
+          cols.push({
+            start: step,
+            end: step + 1,
+            label: String(step)
+          });
+          step++;
+        }
+      }
+      return cols;
+    },
+    snapToUnit(pos) {
+      return Math.round(pos);
+    }
+  };
+}
+
+// src/interaction/TouchManager.ts
+var SVG_NS9 = "http://www.w3.org/2000/svg";
 var LONG_PRESS_MS = 500;
 var DOUBLE_TAP_MS = 300;
 var TAP_MOVE_THRESHOLD = 10;
@@ -2760,6 +5711,8 @@ var EDGE_THRESHOLD2 = 20;
 var MIN_BAR_YEARS2 = 2e-3;
 var TouchManager = class {
   constructor(svg, wrapperEl, app, axis, scale) {
+    this.scheduling = null;
+    this.persist = null;
     this.entries = [];
     this.getRowY = () => 0;
     this.lastTapTime = 0;
@@ -3001,6 +5954,12 @@ var TouchManager = class {
         break;
       }
     }
+    if (this.scheduling) {
+      const target = this.ctx.dragType === "move" ? this.axis.pixelToYear(this.axis.yearToPixel(this.ctx.originalStartYear) + touch.clientX - this.ctx.startX) : currentYear;
+      const result = this.scheduling.edit(this.ctx.dragType, { start: this.ctx.originalStartYear, end: this.ctx.originalEndYear }, target);
+      newStart = result.start;
+      newEnd = result.end;
+    }
     if (this.ctx.ghostEl) {
       const x = this.axis.yearToPixel(newStart);
       const w = Math.max(this.axis.yearToPixel(newEnd) - x, 4);
@@ -3017,7 +5976,7 @@ var TouchManager = class {
     const newStart = this.ctx._newStart;
     const newEnd = this.ctx._newEnd;
     if (newStart != null && newEnd != null) {
-      if (Math.abs(newStart - this.ctx.originalStartYear) > 1e-4 || Math.abs(newEnd - this.ctx.originalEndYear) > 1e-4) {
+      if (Math.abs(newStart - this.ctx.originalStartYear) > 1e-11 || Math.abs(newEnd - this.ctx.originalEndYear) > 1e-11) {
         (_a = this.onDragComplete) == null ? void 0 : _a.call(this, entry, newStart, newEnd);
       }
     }
@@ -3034,12 +5993,14 @@ var TouchManager = class {
     document.body.classList.add("sabidurian-dragging");
   }
   updateCreate(touch) {
+    var _a, _b, _c;
     const svgRect = this.svg.getBoundingClientRect();
     const localX = touch.clientX - svgRect.left;
     const currentYear = this.axis.pixelToYear(localX);
     const snapped = this.scale.snapToUnit(currentYear);
-    const start = Math.min(this.ctx.originalStartYear, snapped);
-    const end = Math.max(this.ctx.originalStartYear, snapped);
+    const created = (_a = this.scheduling) == null ? void 0 : _a.edit("create", { start: this.ctx.originalStartYear, end: this.ctx.originalEndYear }, currentYear);
+    const start = (_b = created == null ? void 0 : created.start) != null ? _b : Math.min(this.ctx.originalStartYear, snapped);
+    const end = (_c = created == null ? void 0 : created.end) != null ? _c : Math.max(this.ctx.originalStartYear, snapped);
     if (this.ctx.ghostEl) {
       const x = this.axis.yearToPixel(start);
       const w = Math.max(this.axis.yearToPixel(end) - x, 4);
@@ -3054,7 +6015,7 @@ var TouchManager = class {
     var _a;
     const newStart = this.ctx._newStart;
     const newEnd = this.ctx._newEnd;
-    if (newStart != null && newEnd != null && Math.abs(newEnd - newStart) > MIN_BAR_YEARS2) {
+    if (newStart != null && newEnd != null && (this.scheduling || Math.abs(newEnd - newStart) > MIN_BAR_YEARS2)) {
       (_a = this.onCreate) == null ? void 0 : _a.call(this, newStart, newEnd);
     }
     this.removeGhost();
@@ -3063,7 +6024,7 @@ var TouchManager = class {
   // ── Ghost bar ──
   createGhost(x, y, width) {
     this.removeGhost();
-    const ghost = document.createElementNS(SVG_NS7, "rect");
+    const ghost = document.createElementNS(SVG_NS9, "rect");
     ghost.setAttribute("x", `${x}`);
     ghost.setAttribute("y", `${y}`);
     ghost.setAttribute("width", `${Math.max(width, 4)}`);
@@ -3081,7 +6042,7 @@ var TouchManager = class {
   }
   // ── Helpers ──
   getDragType(entry, svgLocalX) {
-    if (entry.isPoint) return "move";
+    if (entry.isPoint || entry.width < EDGE_THRESHOLD2 * 3) return "move";
     const barLocalX = svgLocalX - entry.x;
     if (barLocalX < EDGE_THRESHOLD2) return "resize-start";
     if (barLocalX > entry.width - EDGE_THRESHOLD2) return "resize-end";
@@ -3211,1669 +6172,15 @@ var TouchManager = class {
   }
 };
 
-// src/utils/debounce.ts
-function debounce(fn, delay) {
-  let timer = null;
-  let rafId = null;
-  const debounced = (...args) => {
-    if (delay === 0) {
-      if (rafId != null) return;
-      rafId = requestAnimationFrame(() => {
-        rafId = null;
-        fn(...args);
-      });
-    } else {
-      if (timer != null) clearTimeout(timer);
-      timer = setTimeout(() => {
-        timer = null;
-        fn(...args);
-      }, delay);
-    }
-  };
-  return debounced;
-}
-function isTouchDevice() {
-  return "ontouchstart" in window || navigator.maxTouchPoints > 0 || // @ts-ignore — vendor prefix
-  navigator.msMaxTouchPoints > 0;
-}
-function isMobileViewport() {
-  return window.innerWidth < 768;
-}
-
-// src/model/ViewportCuller.ts
-var H_BUFFER = 200;
-var V_BUFFER = 100;
-var ViewportCuller = class {
-  constructor(getRowY) {
-    this.getRowY = getRowY;
-  }
-  /**
-   * Return only the entries whose bars/points fall within the visible
-   * scroll region (with buffer).
-   */
-  cull(entries, bounds) {
-    const left = bounds.scrollLeft - H_BUFFER;
-    const right = bounds.scrollLeft + bounds.viewportWidth + H_BUFFER;
-    const top = bounds.scrollTop - V_BUFFER;
-    const bottom = bounds.scrollTop + bounds.viewportHeight + V_BUFFER;
-    return entries.filter((entry) => {
-      const entryLeft = entry.x;
-      const entryRight = entry.isPoint ? entry.x + 40 : entry.x + entry.width;
-      if (entryRight < left || entryLeft > right) return false;
-      const rowY = this.getRowY(entry.row);
-      if (rowY + ROW_HEIGHT < top || rowY > bottom) return false;
-      return true;
-    });
-  }
-  /**
-   * Quick check: did the viewport change enough to warrant a re-cull?
-   * Returns true if scroll moved more than half the buffer distance.
-   */
-  static shouldRecull(prev, curr) {
-    if (!prev) return true;
-    const dh = Math.abs(curr.scrollLeft - prev.scrollLeft);
-    const dv = Math.abs(curr.scrollTop - prev.scrollTop);
-    return dh > H_BUFFER / 2 || dv > V_BUFFER / 2;
-  }
-};
-
-// src/interaction/MeasureManager.ts
-var SVG_NS8 = "http://www.w3.org/2000/svg";
-var MeasureManager = class {
-  constructor(svg, containerEl, axis) {
-    this.svg = svg;
-    this.containerEl = containerEl;
-    this.axis = axis;
-    this.state = "idle";
-    this.pointA = null;
-    this.pointB = null;
-    this.overlayEl = null;
-    this.markerA = null;
-    this.markerB = null;
-    this.spanLine = null;
-    /** When true, shows "N positions" instead of time units. */
-    this.sequenceMode = false;
-  }
-  activate() {
-    this.state = "awaiting-a";
-    this.containerEl.classList.add("sabidurian-measure-mode");
-  }
-  deactivate() {
-    this.state = "idle";
-    this.containerEl.classList.remove("sabidurian-measure-mode");
-    this.clearVisuals();
-  }
-  get isActive() {
-    return this.state !== "idle";
-  }
-  handleClick(e) {
-    if (this.state === "idle") return false;
-    const rect = this.svg.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const year = this.axis.pixelToYear(x);
-    if (this.state === "awaiting-a") {
-      this.pointA = { year, x, y };
-      this.renderMarker(this.pointA, "a");
-      this.state = "awaiting-b";
-      return true;
-    }
-    if (this.state === "awaiting-b") {
-      this.pointB = { year, x, y };
-      this.renderMarker(this.pointB, "b");
-      this.renderMeasurement();
-      this.state = "displaying";
-      return true;
-    }
-    if (this.state === "displaying") {
-      this.deactivate();
-      return true;
-    }
-    return false;
-  }
-  handleKeydown(e) {
-    if (e.key === "Escape" && this.state !== "idle") {
-      this.deactivate();
-      return true;
-    }
-    return false;
-  }
-  renderMarker(point, id) {
-    const line = document.createElementNS(SVG_NS8, "line");
-    line.setAttribute("x1", `${point.x}`);
-    line.setAttribute("x2", `${point.x}`);
-    line.setAttribute("y1", "0");
-    const svgHeight = this.svg.getAttribute("height") || `${this.svg.clientHeight}`;
-    line.setAttribute("y2", svgHeight);
-    line.classList.add("sabidurian-measure-marker");
-    this.svg.appendChild(line);
-    if (id === "a") this.markerA = line;
-    else this.markerB = line;
-  }
-  renderMeasurement() {
-    if (!this.pointA || !this.pointB) return;
-    const [earlier, later] = this.pointA.year < this.pointB.year ? [this.pointA, this.pointB] : [this.pointB, this.pointA];
-    const midY = Math.min(earlier.y, later.y) - 16;
-    const spanLine = document.createElementNS(SVG_NS8, "line");
-    spanLine.setAttribute("x1", `${earlier.x}`);
-    spanLine.setAttribute("x2", `${later.x}`);
-    spanLine.setAttribute("y1", `${midY}`);
-    spanLine.setAttribute("y2", `${midY}`);
-    spanLine.classList.add("sabidurian-measure-span");
-    this.svg.appendChild(spanLine);
-    this.spanLine = spanLine;
-    const durationText = this.sequenceMode ? this.computeSequenceDistance(earlier.year, later.year) : this.computeDuration(earlier.year, later.year);
-    const overlay = document.createElement("div");
-    overlay.classList.add("sabidurian-measure-label");
-    overlay.textContent = durationText;
-    const midX = (earlier.x + later.x) / 2;
-    const labelTop = Math.max(4, midY - 28);
-    overlay.style.left = `${midX}px`;
-    overlay.style.top = `${labelTop}px`;
-    const timelineBody = this.containerEl.querySelector(".sabidurian-timeline-body");
-    if (timelineBody) {
-      timelineBody.appendChild(overlay);
-    } else {
-      this.containerEl.appendChild(overlay);
-    }
-    this.overlayEl = overlay;
-  }
-  computeDuration(yearA, yearB) {
-    const diff = Math.abs(yearB - yearA);
-    if (diff >= 1) {
-      const years = Math.floor(diff);
-      const remainingMonths = Math.round((diff - years) * 12);
-      if (remainingMonths > 0 && years < 100) {
-        return `${years} year${years !== 1 ? "s" : ""}, ${remainingMonths} month${remainingMonths !== 1 ? "s" : ""}`;
-      }
-      return `~${years.toLocaleString()} year${years !== 1 ? "s" : ""}`;
-    }
-    const months = Math.floor(diff * 12);
-    if (months >= 1) {
-      const remainingDays = Math.round(diff * 365 - months * 30.44);
-      if (remainingDays > 0) {
-        return `${months} month${months !== 1 ? "s" : ""}, ${remainingDays} day${remainingDays !== 1 ? "s" : ""}`;
-      }
-      return `${months} month${months !== 1 ? "s" : ""}`;
-    }
-    const days = Math.round(diff * 365);
-    return `${days} day${days !== 1 ? "s" : ""}`;
-  }
-  computeSequenceDistance(posA, posB) {
-    const diff = Math.abs(Math.round(posB) - Math.round(posA));
-    return `${diff} position${diff !== 1 ? "s" : ""}`;
-  }
-  clearVisuals() {
-    var _a, _b, _c, _d;
-    (_a = this.markerA) == null ? void 0 : _a.remove();
-    (_b = this.markerB) == null ? void 0 : _b.remove();
-    (_c = this.spanLine) == null ? void 0 : _c.remove();
-    (_d = this.overlayEl) == null ? void 0 : _d.remove();
-    this.markerA = this.markerB = this.spanLine = null;
-    this.overlayEl = null;
-    this.pointA = this.pointB = null;
-  }
-  destroy() {
-    this.deactivate();
-  }
-};
-
-// src/renderer/MarkerRenderer.ts
-var SVG_NS9 = "http://www.w3.org/2000/svg";
-var MarkerRenderer = class {
-  constructor() {
-    this.markerGroup = null;
-  }
-  render(svg, markers, axis, canvasHeight) {
-    this.destroy();
-    const markerGroup = document.createElementNS(SVG_NS9, "g");
-    markerGroup.classList.add("sabidurian-markers-group");
-    for (const marker of markers) {
-      if (!marker.enabled) continue;
-      if (marker.date) {
-        const parsed = parseSabidurianDate(marker.date);
-        if (!parsed) continue;
-        const year = sabidurianDateToYear(parsed);
-        const x = axis.yearToPixel(year);
-        const line = document.createElementNS(SVG_NS9, "line");
-        line.setAttribute("x1", `${x}`);
-        line.setAttribute("x2", `${x}`);
-        line.setAttribute("y1", "0");
-        line.setAttribute("y2", `${canvasHeight}`);
-        line.style.stroke = marker.color;
-        line.classList.add("sabidurian-marker-line");
-        markerGroup.appendChild(line);
-        const text = document.createElementNS(SVG_NS9, "text");
-        text.setAttribute("x", `${x + 4}`);
-        text.setAttribute("y", "12");
-        text.textContent = marker.label;
-        text.classList.add("sabidurian-marker-label");
-        text.style.fill = marker.color;
-        markerGroup.appendChild(text);
-      } else if (marker.start && marker.end) {
-        const startParsed = parseSabidurianDate(marker.start);
-        const endParsed = parseSabidurianDate(marker.end);
-        if (!startParsed || !endParsed) continue;
-        const x1 = axis.yearToPixel(sabidurianDateToYear(startParsed));
-        const x2 = axis.yearToPixel(sabidurianDateToYear(endParsed));
-        const rect = document.createElementNS(SVG_NS9, "rect");
-        rect.setAttribute("x", `${Math.min(x1, x2)}`);
-        rect.setAttribute("y", "0");
-        rect.setAttribute("width", `${Math.abs(x2 - x1)}`);
-        rect.setAttribute("height", `${canvasHeight}`);
-        rect.style.fill = marker.color;
-        rect.classList.add("sabidurian-marker-band");
-        markerGroup.appendChild(rect);
-        const text = document.createElementNS(SVG_NS9, "text");
-        text.setAttribute("x", `${Math.min(x1, x2) + 4}`);
-        text.setAttribute("y", "12");
-        text.textContent = marker.label;
-        text.classList.add("sabidurian-marker-label");
-        text.style.fill = marker.color;
-        markerGroup.appendChild(text);
-      }
-    }
-    const barsGroup = svg.querySelector(".sabidurian-bars-group");
-    if (barsGroup) {
-      svg.insertBefore(markerGroup, barsGroup);
-    } else {
-      svg.appendChild(markerGroup);
-    }
-    this.markerGroup = markerGroup;
-  }
-  destroy() {
-    var _a;
-    (_a = this.markerGroup) == null ? void 0 : _a.remove();
-    this.markerGroup = null;
-  }
-};
-
-// src/scale/scales/DayScale.ts
-var HOUR_IN_YEARS = 1 / 8760;
-var MINUTE_IN_MS = 60 * 1e3;
-function pickStepMinutes(rangeYears) {
-  const rangeHours = rangeYears * 8760;
-  if (rangeHours <= 12) return 15;
-  if (rangeHours <= 48) return 30;
-  if (rangeHours <= 7 * 24) return 60;
-  return 180;
-}
-var DayScale = {
-  id: "day",
-  label: "Day",
-  unitDurationYears: HOUR_IN_YEARS,
-  supportsSubYear: true,
-  supportsBCE: false,
-  minColumnPx: 26,
-  writePrecision: "minute",
-  getColumnBoundaries(start, end) {
-    const cols = [];
-    const stepMin = pickStepMinutes(Math.max(end - start, 1e-5));
-    const stepMs = stepMin * MINUTE_IN_MS;
-    const startDate = fractionalYearToDate(start);
-    startDate.setSeconds(0, 0);
-    startDate.setMinutes(Math.floor(startDate.getMinutes() / stepMin) * stepMin);
-    const endDate = fractionalYearToDate(end);
-    let cur = new Date(startDate);
-    while (cur <= endDate && cols.length < 1e4) {
-      const next = new Date(cur.getTime() + stepMs);
-      const colStart = dateToFractionalYear(cur);
-      const colEnd = dateToFractionalYear(next);
-      const h = cur.getHours();
-      const m = cur.getMinutes();
-      const hh = String(h).padStart(2, "0");
-      const mm = String(m).padStart(2, "0");
-      const label = stepMin >= 60 ? `${hh}:00` : `:${mm}`;
-      const dayLabel = cur.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-      let tierLabel;
-      let isTierStart;
-      if (stepMin >= 60) {
-        tierLabel = dayLabel;
-        isTierStart = h === 0;
-      } else {
-        const isMidnight = h === 0 && m === 0;
-        tierLabel = isMidnight ? `${dayLabel} \xB7 ${hh}:00` : `${hh}:00`;
-        isTierStart = m === 0;
-      }
-      cols.push({ start: colStart, end: colEnd, label, tierLabel, isTierStart });
-      cur = next;
-    }
-    return cols;
-  },
-  snapToUnit(year) {
-    const d = fractionalYearToDate(year);
-    d.setSeconds(0, 0);
-    d.setMinutes(Math.round(d.getMinutes() / 15) * 15);
-    return dateToFractionalYear(d);
-  }
-};
-function fractionalYearToDate(fy) {
-  const year = Math.floor(fy);
-  const frac = fy - year;
-  const start = new Date(year, 0, 1).getTime();
-  const end = new Date(year + 1, 0, 1).getTime();
-  return new Date(start + frac * (end - start));
-}
-function dateToFractionalYear(d) {
-  const year = d.getFullYear();
-  const start = new Date(year, 0, 1).getTime();
-  const end = new Date(year + 1, 0, 1).getTime();
-  return year + (d.getTime() - start) / (end - start);
-}
-registerScale(DayScale);
-
-// src/scale/scales/WeekScale.ts
-var WEEK_IN_YEARS = 7 / 365;
-var WeekScale = {
-  id: "week",
-  label: "Week",
-  unitDurationYears: WEEK_IN_YEARS,
-  supportsSubYear: true,
-  supportsBCE: false,
-  getColumnBoundaries(start, end) {
-    const cols = [];
-    const startDate = fractionalYearToDate2(start);
-    const dow = startDate.getDay();
-    const diff = dow === 0 ? -6 : 1 - dow;
-    startDate.setDate(startDate.getDate() + diff);
-    startDate.setHours(0, 0, 0, 0);
-    const endDate = fractionalYearToDate2(end);
-    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let cur = new Date(startDate);
-    while (cur <= endDate && cols.length < 1e3) {
-      const next = new Date(cur);
-      next.setDate(next.getDate() + 7);
-      const colStart = dateToFracYear(cur);
-      const colEnd = dateToFracYear(next);
-      const label = `${months[cur.getMonth()]} ${cur.getDate()}`;
-      const tierLabel = `${months[cur.getMonth()]} ${cur.getFullYear()}`;
-      const isTierStart = cur.getDate() <= 7;
-      cols.push({ start: colStart, end: colEnd, label, tierLabel, isTierStart });
-      cur = next;
-    }
-    return cols;
-  },
-  snapToUnit(year) {
-    const d = fractionalYearToDate2(year);
-    const dow = d.getDay();
-    const diff = dow === 0 ? -6 : 1 - dow;
-    d.setDate(d.getDate() + diff);
-    return dateToFracYear(d);
-  }
-};
-function fractionalYearToDate2(fy) {
-  const year = Math.floor(fy);
-  const frac = fy - year;
-  const start = new Date(year, 0, 1).getTime();
-  const end = new Date(year + 1, 0, 1).getTime();
-  return new Date(start + frac * (end - start));
-}
-function dateToFracYear(d) {
-  const year = d.getFullYear();
-  const start = new Date(year, 0, 1).getTime();
-  const end = new Date(year + 1, 0, 1).getTime();
-  return year + (d.getTime() - start) / (end - start);
-}
-registerScale(WeekScale);
-
-// src/scale/scales/MonthScale.ts
-var MonthScale = {
-  id: "month",
-  label: "Month",
-  unitDurationYears: 1 / 12,
-  supportsSubYear: true,
-  supportsBCE: false,
-  getColumnBoundaries(start, end) {
-    const cols = [];
-    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let year = Math.floor(start);
-    let month = Math.max(0, Math.floor((start - year) * 12));
-    while (cols.length < 1e3) {
-      const colStart = year + month / 12;
-      const nextMonth = month + 1;
-      const nextYear = nextMonth >= 12 ? year + 1 : year;
-      const nm = nextMonth % 12;
-      const colEnd = nextYear + nm / 12;
-      if (colStart > end) break;
-      cols.push({
-        start: colStart,
-        end: colEnd,
-        label: months[month],
-        tierLabel: `${year}`,
-        isTierStart: month === 0
-      });
-      year = nextYear;
-      month = nm;
-    }
-    return cols;
-  },
-  snapToUnit(year) {
-    const y = Math.floor(year);
-    const m = Math.round((year - y) * 12);
-    return y + m / 12;
-  }
-};
-registerScale(MonthScale);
-
-// src/scale/scales/QuarterScale.ts
-var QuarterScale = {
-  id: "quarter",
-  label: "Quarter",
-  unitDurationYears: 0.25,
-  supportsSubYear: true,
-  supportsBCE: false,
-  getColumnBoundaries(start, end) {
-    const cols = [];
-    let year = Math.floor(start);
-    let q = Math.max(0, Math.floor((start - year) * 4));
-    while (cols.length < 500) {
-      const colStart = year + q * 0.25;
-      const colEnd = year + (q + 1) * 0.25;
-      if (colStart > end) break;
-      cols.push({
-        start: colStart,
-        end: colEnd,
-        label: `Q${q + 1}`,
-        tierLabel: `${year}`,
-        isTierStart: q === 0
-      });
-      q++;
-      if (q >= 4) {
-        q = 0;
-        year++;
-      }
-    }
-    return cols;
-  },
-  snapToUnit(year) {
-    const y = Math.floor(year);
-    const q = Math.round((year - y) * 4);
-    return y + q * 0.25;
-  }
-};
-registerScale(QuarterScale);
-
-// src/scale/scales/YearScale.ts
-var YearScale = {
-  id: "year",
-  label: "Year",
-  unitDurationYears: 1,
-  supportsSubYear: false,
-  supportsBCE: true,
-  getColumnBoundaries(start, end) {
-    const cols = [];
-    let year = Math.floor(start);
-    while (year <= Math.ceil(end) && cols.length < 500) {
-      cols.push({
-        start: year,
-        end: year + 1,
-        label: formatYear(year),
-        tierLabel: `${Math.floor(year / 10) * 10}s`,
-        isTierStart: year % 10 === 0
-      });
-      year++;
-    }
-    return cols;
-  },
-  snapToUnit(year) {
-    return Math.round(year);
-  }
-};
-registerScale(YearScale);
-
-// src/scale/scales/DecadeScale.ts
-var DecadeScale = {
-  id: "decade",
-  label: "Decade",
-  unitDurationYears: 10,
-  supportsSubYear: false,
-  supportsBCE: true,
-  getColumnBoundaries(start, end) {
-    const cols = [];
-    let decade = Math.floor(start / 10) * 10;
-    while (decade <= Math.ceil(end) && cols.length < 500) {
-      const label = `${formatYear(decade)}s`;
-      const centuryStart = Math.floor(decade / 100) * 100;
-      const tierLabel = decade <= 0 ? `${Math.ceil((1 - centuryStart) / 100)} cent. BCE` : `${Math.floor(centuryStart / 100) + 1}th cent.`;
-      cols.push({
-        start: decade,
-        end: decade + 10,
-        label,
-        tierLabel,
-        isTierStart: decade % 100 === 0
-      });
-      decade += 10;
-    }
-    return cols;
-  },
-  snapToUnit(year) {
-    return Math.round(year / 10) * 10;
-  }
-};
-var CenturyScale = {
-  id: "century",
-  label: "Century",
-  unitDurationYears: 100,
-  supportsSubYear: false,
-  supportsBCE: true,
-  getColumnBoundaries(start, end) {
-    const cols = [];
-    let century = Math.floor(start / 100) * 100;
-    while (century <= Math.ceil(end) && cols.length < 200) {
-      let label;
-      if (century <= 0) {
-        label = `${Math.ceil((1 - century) / 100)} cent. BCE`;
-      } else {
-        const num = Math.floor(century / 100) + 1;
-        label = `${num}th cent.`;
-      }
-      const milStart = Math.floor(century / 1e3) * 1e3;
-      const tierLabel = century <= 0 ? `${Math.ceil((1 - milStart) / 1e3)} mil. BCE` : `${Math.floor(milStart / 1e3) + 1} millennium`;
-      cols.push({
-        start: century,
-        end: century + 100,
-        label,
-        tierLabel,
-        isTierStart: century % 1e3 === 0
-      });
-      century += 100;
-    }
-    return cols;
-  },
-  snapToUnit(year) {
-    return Math.round(year / 100) * 100;
-  }
-};
-var MillenniumScale = {
-  id: "millennium",
-  label: "Millennium",
-  unitDurationYears: 1e3,
-  supportsSubYear: false,
-  supportsBCE: true,
-  getColumnBoundaries(start, end) {
-    const cols = [];
-    let mil = Math.floor(start / 1e3) * 1e3;
-    while (mil <= Math.ceil(end) && cols.length < 100) {
-      let label;
-      if (mil <= 0) {
-        label = `${Math.ceil((1 - mil) / 1e3)} mil. BCE`;
-      } else {
-        const num = Math.floor(mil / 1e3) + 1;
-        label = `${num} millennium`;
-      }
-      cols.push({
-        start: mil,
-        end: mil + 1e3,
-        label
-      });
-      mil += 1e3;
-    }
-    return cols;
-  },
-  snapToUnit(year) {
-    return Math.round(year / 1e3) * 1e3;
-  }
-};
-registerScale(DecadeScale);
-registerScale(CenturyScale);
-registerScale(MillenniumScale);
-
-// src/SabidurianView.ts
-var VIEW_PADDING_RATIO = 0.1;
-var MIN_TIMELINE_HEIGHT = 200;
-var CULLING_THRESHOLD = 150;
-var SYSTEM_PROP_PREFIXES = ["file.", "formula."];
-var SabidurianView = class extends import_obsidian6.BasesView {
-  constructor(controller, scrollEl, plugin) {
-    super(controller);
-    this.type = "sabidurian";
-    this.rootEl = null;
-    // Renderers
-    this.headerRenderer = null;
-    this.timelineRenderer = null;
-    this.barRenderer = null;
-    this.sideTableRenderer = null;
-    this.dragManager = null;
-    this.arrowRenderer = null;
-    this.arrowDragManager = null;
-    this.contextMenuManager = null;
-    this.keyboardManager = null;
-    this.selectionManager = null;
-    this.touchManager = null;
-    this.groupHeaderRenderer = null;
-    this.measureManager = null;
-    this.markerRenderer = null;
-    this.layoutEngine = new LayoutEngine();
-    // Debounced re-render for rapid frontmatter changes (drag, touch)
-    this.debouncedRender = debounce(() => this.onDataUpdated(), 16);
-    // Axis & scale
-    this.axis = new NumericAxis(2025, 2026, 800);
-    this.currentScale = null;
-    // Parsed entries kept for hover sync
-    this.currentEntries = [];
-    this.currentGroups = [];
-    // Collapsed group state (persisted in config)
-    this.collapsedGroups = /* @__PURE__ */ new Set();
-    // ── Lock state (prevents drag/resize/create) ──
-    this._locked = false;
-    /** Set to true after the first successful render so initial-scroll logic only fires once. */
-    this._hasRendered = false;
-    // ── Viewport culling (Phase 11) ──
-    this.viewportCuller = null;
-    /** All entries after layout (row >= 0), before viewport filtering. */
-    this.allVisibleEntries = [];
-    /** Whether culling is active for the current dataset. */
-    this.cullingActive = false;
-    this.lastViewportBounds = null;
-    /** Debounced scroll handler for viewport-based re-render. */
-    this.debouncedViewportRender = debounce(() => this.renderVisibleBars(), 0);
-    /** Cached config references needed by renderVisibleBars. */
-    this._showArrows = true;
-    this._isGrouped = false;
-    this._startPropName = "start-date";
-    this._endPropName = "end-date";
-    this.scrollEl = scrollEl;
-    this.plugin = plugin;
-    this.renderSkeleton();
-  }
-  onDataUpdated() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C;
-    const prevScrollLeft = (_b = (_a = this.timelineRenderer) == null ? void 0 : _a.element.scrollLeft) != null ? _b : 0;
-    const prevScrollTop = (_d = (_c = this.timelineRenderer) == null ? void 0 : _c.element.scrollTop) != null ? _d : 0;
-    (_e = this.dragManager) == null ? void 0 : _e.destroy();
-    this.dragManager = null;
-    (_f = this.arrowDragManager) == null ? void 0 : _f.destroy();
-    this.arrowDragManager = null;
-    (_g = this.contextMenuManager) == null ? void 0 : _g.destroy();
-    this.contextMenuManager = null;
-    (_h = this.keyboardManager) == null ? void 0 : _h.destroy();
-    this.keyboardManager = null;
-    (_i = this.selectionManager) == null ? void 0 : _i.destroy();
-    this.selectionManager = null;
-    (_j = this.touchManager) == null ? void 0 : _j.destroy();
-    this.touchManager = null;
-    (_k = this.measureManager) == null ? void 0 : _k.destroy();
-    this.measureManager = null;
-    (_l = this.markerRenderer) == null ? void 0 : _l.destroy();
-    this.markerRenderer = null;
-    (_m = this.arrowRenderer) == null ? void 0 : _m.destroy();
-    this.arrowRenderer = null;
-    (_n = this.groupHeaderRenderer) == null ? void 0 : _n.destroy();
-    this.groupHeaderRenderer = null;
-    (_o = this.barRenderer) == null ? void 0 : _o.destroy();
-    this.barRenderer = null;
-    (_p = this.sideTableRenderer) == null ? void 0 : _p.destroy();
-    this.sideTableRenderer = null;
-    if (this.rootEl) {
-      this.rootEl.remove();
-    }
-    this.scrollEl.querySelectorAll(":scope > .sabidurian-container").forEach((el) => el.remove());
-    this.rootEl = this.scrollEl.createDiv({ cls: "sabidurian-container" });
-    const entries = (_r = (_q = this.data) == null ? void 0 : _q.data) != null ? _r : [];
-    if (entries.length === 0) {
-      this.renderEmptyState();
-      return;
-    }
-    const startPropId = this.config.getAsPropertyId("startDateProp");
-    const endPropId = this.config.getAsPropertyId("endDateProp");
-    const colorPropId = this.config.getAsPropertyId("colorProp");
-    const earliestStartPropId = this.config.getAsPropertyId("earliestStartProp");
-    const latestEndPropId = this.config.getAsPropertyId("latestEndProp");
-    const startPropRaw = this.config.get("startDateProp");
-    const endPropRaw = this.config.get("endDateProp");
-    this._startPropName = startPropRaw ? startPropRaw.replace(/^note\./, "") : "start-date";
-    this._endPropName = endPropRaw ? endPropRaw.replace(/^note\./, "") : "end-date";
-    const depPropRaw = this.config.get("dependencyProp");
-    const depPropName = (depPropRaw == null ? void 0 : depPropRaw.trim()) || this.plugin.settings.dependencyProperty || "blocked-by";
-    const enableBCE = (_s = this.config.get("enableBCE")) != null ? _s : true;
-    const groupedData = (_u = (_t = this.data) == null ? void 0 : _t.groupedData) != null ? _u : [];
-    const isGrouped = groupedData.length > 1 || groupedData.length === 1 && groupedData[0].hasKey();
-    const savedCollapsed = this.config.get("collapsedGroups");
-    if (savedCollapsed) {
-      this.collapsedGroups = new Set(savedCollapsed);
-    }
-    resetColorCache();
-    let sabidurianEntries;
-    let sabidurianGroups = [];
-    if (isGrouped) {
-      sabidurianGroups = [];
-      sabidurianEntries = [];
-      for (const group of groupedData) {
-        const groupName = group.hasKey() ? String(group.key) : "(No value)";
-        const parsed = this.parseEntries(group.entries, startPropId, endPropId, colorPropId, depPropName, enableBCE, earliestStartPropId, latestEndPropId);
-        for (const e of parsed) e.groupKey = groupName;
-        sabidurianEntries.push(...parsed);
-        sabidurianGroups.push({
-          name: groupName,
-          entries: parsed,
-          collapsed: this.collapsedGroups.has(groupName),
-          headerY: 0,
-          totalHeight: 0
-        });
-      }
-    } else {
-      sabidurianEntries = this.parseEntries(entries, startPropId, endPropId, colorPropId, depPropName, enableBCE, earliestStartPropId, latestEndPropId);
-    }
-    this.currentEntries = sabidurianEntries;
-    this.currentGroups = sabidurianGroups;
-    if (sabidurianEntries.length === 0) {
-      this.renderEmptyState("No entries have valid dates. Configure the Start date property above.");
-      return;
-    }
-    if (sabidurianEntries.length > this.plugin.settings.maxEntries) {
-      new import_obsidian6.Notice(
-        `Time & Line: ${sabidurianEntries.length} entries exceed the ${this.plugin.settings.maxEntries} limit. Performance may degrade.`,
-        8e3
-      );
-    }
-    const initialScroll = (_v = this.config.get("initialScroll")) != null ? _v : "today";
-    const { viewStart, viewEnd, range } = this.computeViewBounds(
-      sabidurianEntries,
-      initialScroll === "today"
-    );
-    const containerWidth = this.rootEl.clientWidth || 800;
-    let savedScaleId = this.config.get("scaleId");
-    if (savedScaleId === "hour") savedScaleId = "day";
-    this.currentScale = savedScaleId && savedScaleId !== "auto" ? (_w = SCALES.find((s) => s.id === savedScaleId)) != null ? _w : autoSelectScale(range, containerWidth) : autoSelectScale(range, containerWidth);
-    const columns = this.currentScale.getColumnBoundaries(viewStart, viewEnd);
-    const MAX_CANVAS_WIDTH = 32e3;
-    const minColPx = (_x = this.currentScale.minColumnPx) != null ? _x : 80;
-    const densityWidth = Math.min(MAX_CANVAS_WIDTH, columns.length * minColPx);
-    const canvasWidth = Math.max(containerWidth, densityWidth);
-    this.axis.setView(viewStart, viewEnd, canvasWidth);
-    const configLocked = (_y = this.config.get("locked")) != null ? _y : false;
-    const autoLock = this.plugin.settings.lockOnMobile && isTouchDevice();
-    this._locked = configLocked || autoLock;
-    this.renderControls(sabidurianEntries.length);
-    const bodyContainerEl = this.rootEl.createDiv({ cls: "sabidurian-body-container" });
-    const headerContainerEl = bodyContainerEl.createDiv({ cls: "sabidurian-header-container" });
-    const isMobile = isMobileViewport();
-    const showTable = isMobile ? false : (_z = this.config.get("showTable")) != null ? _z : true;
-    const savedTableWidth = this.config.get("tableWidth");
-    const tableColumns = this.getTableColumns(startPropId, endPropId);
-    if (showTable) {
-      const tableHeaderSpacer = headerContainerEl.createDiv({ cls: "sabidurian-table-header-spacer" });
-      tableHeaderSpacer.style.width = `${savedTableWidth != null ? savedTableWidth : 220}px`;
-      tableHeaderSpacer.style.flexShrink = "0";
-    }
-    const timelineHeaderEl = headerContainerEl.createDiv({ cls: "sabidurian-timeline-header-wrap" });
-    this.headerRenderer = new HeaderRenderer(timelineHeaderEl);
-    this.headerRenderer.render(columns, this.axis);
-    const contentEl = bodyContainerEl.createDiv({ cls: "sabidurian-content-row" });
-    let canvasHeight;
-    let visibleEntries;
-    if (isGrouped) {
-      const totalHeight = this.layoutEngine.layoutGrouped(sabidurianGroups, this.axis);
-      canvasHeight = Math.max(MIN_TIMELINE_HEIGHT, totalHeight);
-      visibleEntries = sabidurianEntries.filter((e) => e.row >= 0);
-    } else {
-      const totalHeight = this.layoutEngine.layout(sabidurianEntries, this.axis);
-      canvasHeight = Math.max(MIN_TIMELINE_HEIGHT, totalHeight);
-      visibleEntries = sabidurianEntries;
-    }
-    if (showTable) {
-      this.sideTableRenderer = new SideTableRenderer(
-        contentEl,
-        this.plugin.app,
-        savedTableWidth
-      );
-      if (isGrouped) {
-        this.sideTableRenderer.renderGrouped(
-          sabidurianGroups,
-          sabidurianEntries,
-          tableColumns,
-          (row) => this.layoutEngine.getRowY(row)
-        );
-        this.sideTableRenderer.setGroupToggleCallback((groupName) => {
-          this.toggleGroup(groupName);
-        });
-      } else {
-        this.sideTableRenderer.render(
-          sabidurianEntries,
-          tableColumns,
-          (row) => this.layoutEngine.getRowY(row)
-        );
-      }
-      this.sideTableRenderer.setWidthChangeCallback((w) => {
-        this.config.set("tableWidth", w);
-        const spacer = headerContainerEl.querySelector(".sabidurian-table-header-spacer");
-        if (spacer) spacer.style.width = `${w}px`;
-      });
-      this.sideTableRenderer.setRowHoverCallback((idx) => {
-        this.highlightBar(idx);
-      });
-    }
-    const showToday = (_A = this.config.get("showToday")) != null ? _A : true;
-    this.timelineRenderer = new TimelineRenderer(contentEl);
-    this.timelineRenderer.render(columns, this.axis, canvasHeight, showToday);
-    this._showArrows = (_B = this.config.get("showArrows")) != null ? _B : true;
-    this._isGrouped = isGrouped;
-    this.allVisibleEntries = visibleEntries;
-    this.cullingActive = visibleEntries.length > CULLING_THRESHOLD;
-    this.lastViewportBounds = null;
-    this.viewportCuller = new ViewportCuller((row) => this.layoutEngine.getRowY(row));
-    this.barRenderer = new BarRenderer(
-      this.timelineRenderer.svgElement,
-      this.plugin.app,
-      this.rootEl
-    );
-    this.barRenderer.setAxis(this.axis);
-    this.barRenderer.setDatePropNames(this._startPropName, this._endPropName);
-    const barDisplayProps = [];
-    for (const key of ["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"]) {
-      const val = this.config.get(key);
-      if (val) {
-        barDisplayProps.push(val.replace(/^note\./, ""));
-      }
-    }
-    this.barRenderer.setDisplayProps(
-      barDisplayProps,
-      this.plugin.settings.barPropertyMinWidth,
-      this.plugin.settings.showBarProperties
-    );
-    const focusTagRaw = ((_C = this.config.get("focusTag")) == null ? void 0 : _C.trim()) || null;
-    this.barRenderer.setFocusTag(focusTagRaw ? focusTagRaw.replace(/^#/, "") : null);
-    if (isGrouped) {
-      this.groupHeaderRenderer = new GroupHeaderRenderer(
-        this.timelineRenderer.svgElement
-      );
-      this.groupHeaderRenderer.render(sabidurianGroups, canvasWidth);
-      this.groupHeaderRenderer.setToggleCallback((groupName) => {
-        this.toggleGroup(groupName);
-      });
-    }
-    if (this._showArrows) {
-      this.detectCycles(sabidurianEntries);
-    }
-    this.renderVisibleBars();
-    this.timelineRenderer.raiseTodayMarker();
-    const timelineBody = this.timelineRenderer.element;
-    timelineBody.addEventListener("scroll", () => {
-      var _a2;
-      (_a2 = this.headerRenderer) == null ? void 0 : _a2.setScrollLeft(timelineBody.scrollLeft);
-      if (this.cullingActive) {
-        this.debouncedViewportRender();
-      }
-    });
-    if (this.sideTableRenderer) {
-      const tableBody = this.sideTableRenderer.scrollBody;
-      timelineBody.addEventListener("scroll", () => {
-        tableBody.scrollTop = timelineBody.scrollTop;
-      });
-      tableBody.addEventListener("scroll", () => {
-        timelineBody.scrollTop = tableBody.scrollTop;
-      });
-    }
-    if (prevScrollLeft || prevScrollTop) {
-      requestAnimationFrame(() => {
-        var _a2;
-        timelineBody.scrollLeft = prevScrollLeft;
-        timelineBody.scrollTop = prevScrollTop;
-        (_a2 = this.headerRenderer) == null ? void 0 : _a2.setScrollLeft(prevScrollLeft);
-        if (this.sideTableRenderer) {
-          this.sideTableRenderer.scrollBody.scrollTop = prevScrollTop;
-        }
-        if (this.cullingActive) {
-          this.renderVisibleBars();
-        }
-      });
-    } else if (!this._hasRendered) {
-      requestAnimationFrame(() => this.applyInitialScroll());
-    }
-    this._hasRendered = true;
-  }
-  /**
-   * Apply the user's configured initial-scroll position on first render.
-   * Choices: 'today' (default), 'start', 'end'. If today is out of the
-   * computed view bounds, falls back to 'start'.
-   */
-  applyInitialScroll() {
-    var _a, _b;
-    if (!this.timelineRenderer) return;
-    const mode = (_a = this.config.get("initialScroll")) != null ? _a : "today";
-    const body = this.timelineRenderer.element;
-    if (mode === "start") {
-      body.scrollLeft = 0;
-    } else if (mode === "end") {
-      body.scrollLeft = Math.max(0, body.scrollWidth - body.clientWidth);
-    } else {
-      const now = /* @__PURE__ */ new Date();
-      const y = now.getFullYear();
-      const start = new Date(y, 0, 1).getTime();
-      const end = new Date(y + 1, 0, 1).getTime();
-      const todayFrac = y + (now.getTime() - start) / (end - start);
-      if (todayFrac < this.axis.viewStart || todayFrac > this.axis.viewEnd) {
-        body.scrollLeft = 0;
-      } else {
-        this.timelineRenderer.scrollToYear(this.axis, todayFrac);
-      }
-    }
-    (_b = this.headerRenderer) == null ? void 0 : _b.setScrollLeft(body.scrollLeft);
-    if (this.sideTableRenderer) {
-      this.sideTableRenderer.scrollBody.scrollTop = body.scrollTop;
-    }
-    if (this.cullingActive) {
-      this.renderVisibleBars();
-    }
-  }
-  /**
-   * Render (or re-render) bars + arrows + interaction managers for the
-   * entries currently visible in the scroll viewport.
-   *
-   * When culling is inactive (small dataset), renders all entries.
-   * When culling is active, uses ViewportCuller to filter.
-   *
-   * This method can be called repeatedly on scroll without a full
-   * onDataUpdated cycle — it only touches bars, arrows, and interactions.
-   */
-  renderVisibleBars() {
-    var _a, _b, _c, _d, _e, _f, _g, _h;
-    if (!this.timelineRenderer || !this.barRenderer || !this.rootEl) return;
-    const timelineBody = this.timelineRenderer.element;
-    let entriesToRender;
-    if (this.cullingActive && this.viewportCuller) {
-      const bounds = {
-        scrollLeft: timelineBody.scrollLeft,
-        scrollTop: timelineBody.scrollTop,
-        viewportWidth: timelineBody.clientWidth,
-        viewportHeight: timelineBody.clientHeight
-      };
-      if (!ViewportCuller.shouldRecull(this.lastViewportBounds, bounds)) return;
-      this.lastViewportBounds = bounds;
-      entriesToRender = this.viewportCuller.cull(this.allVisibleEntries, bounds);
-    } else {
-      entriesToRender = this.allVisibleEntries;
-    }
-    (_a = this.dragManager) == null ? void 0 : _a.destroy();
-    this.dragManager = null;
-    (_b = this.arrowDragManager) == null ? void 0 : _b.destroy();
-    this.arrowDragManager = null;
-    (_c = this.contextMenuManager) == null ? void 0 : _c.destroy();
-    this.contextMenuManager = null;
-    (_d = this.keyboardManager) == null ? void 0 : _d.destroy();
-    this.keyboardManager = null;
-    (_e = this.selectionManager) == null ? void 0 : _e.destroy();
-    this.selectionManager = null;
-    (_f = this.touchManager) == null ? void 0 : _f.destroy();
-    this.touchManager = null;
-    (_g = this.arrowRenderer) == null ? void 0 : _g.destroy();
-    this.arrowRenderer = null;
-    const markers = this.plugin.settings.markers;
-    if (markers && markers.length > 0) {
-      if (!this.markerRenderer) {
-        this.markerRenderer = new MarkerRenderer();
-      }
-      const svgHeight = parseFloat(this.timelineRenderer.svgElement.getAttribute("height") || "0");
-      this.markerRenderer.render(
-        this.timelineRenderer.svgElement,
-        markers,
-        this.axis,
-        svgHeight
-      );
-    } else {
-      (_h = this.markerRenderer) == null ? void 0 : _h.destroy();
-    }
-    this.barRenderer.render(entriesToRender, (row) => this.layoutEngine.getRowY(row));
-    if (!this.measureManager && this.rootEl) {
-      this.measureManager = new MeasureManager(
-        this.timelineRenderer.svgElement,
-        this.rootEl,
-        this.axis
-      );
-      this.timelineRenderer.svgElement.addEventListener("click", (e) => {
-        var _a2, _b2, _c2;
-        if ((_a2 = this.measureManager) == null ? void 0 : _a2.handleClick(e)) {
-          e.stopPropagation();
-          if (!this.measureManager.isActive) {
-            (_c2 = (_b2 = this.rootEl) == null ? void 0 : _b2.querySelector(".sabidurian-measure-btn")) == null ? void 0 : _c2.classList.remove("sabidurian-measure-active");
-          }
-        }
-      }, true);
-      this.rootEl.addEventListener("keydown", (e) => {
-        var _a2, _b2, _c2;
-        if ((_a2 = this.measureManager) == null ? void 0 : _a2.handleKeydown(e)) {
-          e.stopPropagation();
-          (_c2 = (_b2 = this.rootEl) == null ? void 0 : _b2.querySelector(".sabidurian-measure-btn")) == null ? void 0 : _c2.classList.remove("sabidurian-measure-active");
-        }
-      }, true);
-    }
-    if (this._showArrows) {
-      this.arrowRenderer = new ArrowRenderer(
-        this.timelineRenderer.svgElement,
-        this.plugin.app
-      );
-      this.arrowRenderer.render(
-        entriesToRender,
-        (row) => this.layoutEngine.getRowY(row)
-      );
-      if (!this._locked) {
-        this.arrowDragManager = new ArrowDragManager(
-          this.timelineRenderer.svgElement,
-          this.plugin.app
-        );
-        this.arrowDragManager.attach(
-          this.arrowRenderer.handles,
-          entriesToRender,
-          (row) => this.layoutEngine.getRowY(row)
-        );
-        this.arrowDragManager.setConnectCompleteCallback(() => {
-          setTimeout(() => this.onDataUpdated(), 200);
-        });
-      }
-    }
-    if (!this._locked) {
-      this.dragManager = new DragManager(
-        this.timelineRenderer.svgElement,
-        this.timelineRenderer.element,
-        this.plugin.app,
-        this.axis,
-        this.currentScale
-      );
-      this.dragManager.setDatePropNames(this._startPropName, this._endPropName);
-      this.dragManager.attachToBarGroups(
-        entriesToRender,
-        (row) => this.layoutEngine.getRowY(row)
-      );
-      this.dragManager.setDragCompleteCallback(() => {
-        setTimeout(() => this.onDataUpdated(), 200);
-      });
-      this.dragManager.setCreateCallback(async (startYear, endYear) => {
-        const startStr = this.yearToDateStr(startYear);
-        const endStr = this.yearToDateStr(endYear);
-        await this.createFileForView(void 0, (fm) => {
-          fm[this._startPropName] = startStr;
-          fm[this._endPropName] = endStr;
-        });
-      });
-    }
-    this.selectionManager = new SelectionManager(this.timelineRenderer.svgElement);
-    this.selectionManager.attach(entriesToRender);
-    this.contextMenuManager = new ContextMenuManager(
-      this.timelineRenderer.svgElement,
-      this.plugin.app,
-      this.axis,
-      this.currentScale
-    );
-    this.contextMenuManager.lockedProperty = this.plugin.settings.lockedProperty || "locked";
-    this.contextMenuManager.attach(
-      entriesToRender,
-      (row) => this.layoutEngine.getRowY(row)
-    );
-    this.contextMenuManager.setCreateCallback(async (startYear, endYear) => {
-      const startStr = this.yearToDateStr(startYear);
-      const endStr = this.yearToDateStr(endYear);
-      await this.createFileForView(void 0, (fm) => {
-        fm[this._startPropName] = startStr;
-        fm[this._endPropName] = endStr;
-      });
-    });
-    this.contextMenuManager.setScrollToTodayCallback(() => {
-      this.scrollToToday();
-    });
-    this.contextMenuManager.setChangeScaleCallback((scaleId) => {
-      this.config.set("scaleId", scaleId);
-      this.onDataUpdated();
-    });
-    this.contextMenuManager.setRefreshCallback(() => {
-      setTimeout(() => this.onDataUpdated(), 200);
-    });
-    this.keyboardManager = new KeyboardManager(
-      this.rootEl,
-      this.plugin.app,
-      this.selectionManager,
-      this.currentScale.id
-    );
-    this.keyboardManager.attach(this.allVisibleEntries);
-    this.keyboardManager.setScrollToTodayCallback(() => {
-      this.scrollToToday();
-    });
-    this.keyboardManager.setChangeScaleCallback((scaleId) => {
-      this.config.set("scaleId", scaleId);
-      this.onDataUpdated();
-    });
-    this.keyboardManager.setDeleteEntryCallback(async (entry) => {
-      const confirmed = await confirmAction(this.plugin.app, "Delete entry", `Delete "${entry.label}"? This will move the file to trash.`);
-      if (!confirmed) return;
-      try {
-        await this.plugin.app.vault.trash(entry.file, true);
-        new import_obsidian6.Notice(`Deleted "${entry.label}"`);
-      } catch (err) {
-        new import_obsidian6.Notice(`Failed to delete: ${err}`);
-      }
-    });
-    this.keyboardManager.setMeasureToggleCallback(() => {
-      var _a2, _b2;
-      const btn = (_a2 = this.rootEl) == null ? void 0 : _a2.querySelector(".sabidurian-measure-btn");
-      if ((_b2 = this.measureManager) == null ? void 0 : _b2.isActive) {
-        this.measureManager.deactivate();
-        btn == null ? void 0 : btn.classList.remove("sabidurian-measure-active");
-      } else if (this.measureManager) {
-        this.measureManager.activate();
-        btn == null ? void 0 : btn.classList.add("sabidurian-measure-active");
-      }
-    });
-    if (isTouchDevice()) {
-      this.touchManager = new TouchManager(
-        this.timelineRenderer.svgElement,
-        this.timelineRenderer.element,
-        this.plugin.app,
-        this.axis,
-        this.currentScale
-      );
-      this.touchManager.locked = this._locked;
-      this.touchManager.attach(entriesToRender, (row) => this.layoutEngine.getRowY(row));
-      this.touchManager.setSelectCallback((entry) => {
-        var _a2, _b2;
-        if (entry) {
-          const idx = entriesToRender.indexOf(entry);
-          if (idx >= 0) (_a2 = this.selectionManager) == null ? void 0 : _a2.select(idx);
-        } else {
-          (_b2 = this.selectionManager) == null ? void 0 : _b2.clear();
-        }
-      });
-      this.touchManager.setOpenCallback((entry) => {
-        this.plugin.app.workspace.getLeaf(false).openFile(entry.file);
-      });
-      this.touchManager.setContextMenuCallback((entry, x, y) => {
-        var _a2;
-        const fakeEvent = new MouseEvent("contextmenu", {
-          clientX: x,
-          clientY: y,
-          bubbles: true
-        });
-        (_a2 = this.contextMenuManager) == null ? void 0 : _a2.showBarMenuForTouch(entry, fakeEvent);
-      });
-      this.touchManager.setEmptyContextMenuCallback((x, y) => {
-        var _a2;
-        const fakeEvent = new MouseEvent("contextmenu", {
-          clientX: x,
-          clientY: y,
-          bubbles: true
-        });
-        (_a2 = this.contextMenuManager) == null ? void 0 : _a2.showEmptyMenuForTouch(fakeEvent);
-      });
-      if (!this._locked) {
-        this.touchManager.setDragCompleteCallback(async (entry, newStart, newEnd) => {
-          const startDateStr = this.yearToDateStr(newStart, this.entryWritePrecision(entry, "start"));
-          const endDateStr = this.yearToDateStr(newEnd, this.entryWritePrecision(entry, "end"));
-          await this.plugin.app.fileManager.processFrontMatter(entry.file, (fm) => {
-            fm[this._startPropName] = startDateStr;
-            if (!entry.isPoint) {
-              fm[this._endPropName] = endDateStr;
-            }
-          });
-          setTimeout(() => this.onDataUpdated(), 200);
-        });
-        this.touchManager.setCreateCallback(async (startYear, endYear) => {
-          const startStr = this.yearToDateStr(startYear);
-          const endStr = this.yearToDateStr(endYear);
-          await this.createFileForView(void 0, (fm) => {
-            fm[this._startPropName] = startStr;
-            fm[this._endPropName] = endStr;
-          });
-        });
-      }
-      this.touchManager.setScaleChangeCallback((direction) => {
-        const currentIdx = SCALES.findIndex((s) => {
-          var _a2;
-          return s.id === ((_a2 = this.currentScale) == null ? void 0 : _a2.id);
-        });
-        const newIdx = direction === "in" ? Math.max(0, currentIdx - 1) : Math.min(SCALES.length - 1, currentIdx + 1);
-        if (newIdx !== currentIdx) {
-          this.config.set("scaleId", SCALES[newIdx].id);
-          this.debouncedRender();
-        }
-      });
-    }
-    this.timelineRenderer.raiseTodayMarker();
-  }
-  /** Scroll the timeline to today's position. */
-  scrollToToday() {
-    var _a;
-    const now = /* @__PURE__ */ new Date();
-    const y = now.getFullYear();
-    const start = new Date(y, 0, 1).getTime();
-    const end = new Date(y + 1, 0, 1).getTime();
-    const todayFrac = y + (now.getTime() - start) / (end - start);
-    (_a = this.timelineRenderer) == null ? void 0 : _a.scrollToYear(this.axis, todayFrac);
-  }
-  /** Toggle a group's collapsed state and re-render. */
-  toggleGroup(groupName) {
-    if (this.collapsedGroups.has(groupName)) {
-      this.collapsedGroups.delete(groupName);
-    } else {
-      this.collapsedGroups.add(groupName);
-    }
-    this.config.set("collapsedGroups", Array.from(this.collapsedGroups));
-    this.onDataUpdated();
-  }
-  /** Build table column definitions from visible properties. */
-  getTableColumns(startPropId, endPropId) {
-    var _a, _b, _c;
-    const columns = [];
-    const visibleProps = (_c = (_b = (_a = this.config).getOrder) == null ? void 0 : _b.call(_a)) != null ? _c : [];
-    for (const propId of visibleProps) {
-      if (SYSTEM_PROP_PREFIXES.some((p) => propId.startsWith(p))) continue;
-      if (propId === startPropId || propId === endPropId) continue;
-      const displayName = this.config.getDisplayName(propId);
-      columns.push({ key: displayName, propId });
-    }
-    return columns;
-  }
-  /** Highlight a bar by entry index (for hover sync from side table). */
-  highlightBar(entryIndex) {
-    var _a, _b;
-    const existing = (_a = this.timelineRenderer) == null ? void 0 : _a.svgElement.querySelectorAll(".sabidurian-bar-hover");
-    existing == null ? void 0 : existing.forEach((el) => el.classList.remove("sabidurian-bar-hover"));
-    if (entryIndex == null || entryIndex < 0) return;
-    const groups = (_b = this.timelineRenderer) == null ? void 0 : _b.svgElement.querySelectorAll(".sabidurian-bar-group");
-    if (groups && groups[entryIndex]) {
-      groups[entryIndex].classList.add("sabidurian-bar-hover");
-    }
-  }
-  parseEntries(entries, startPropId, endPropId, colorPropId, depPropName, enableBCE = true, earliestStartPropId, latestEndPropId) {
-    var _a;
-    const result = [];
-    for (const entry of entries) {
-      const startVal = startPropId ? entry.getValue(startPropId) : null;
-      let startDate = parseSabidurianDate(startVal);
-      const endVal = endPropId ? entry.getValue(endPropId) : null;
-      let endDate = parseSabidurianDate(endVal);
-      let earliestStart;
-      let latestEnd;
-      let earliestStartYear;
-      let latestEndYear;
-      if (earliestStartPropId) {
-        const esVal = entry.getValue(earliestStartPropId);
-        const esParsed = parseSabidurianDate(esVal);
-        if (esParsed) {
-          earliestStart = esParsed;
-          earliestStartYear = sabidurianDateToYear(esParsed);
-        }
-      }
-      if (latestEndPropId) {
-        const leVal = entry.getValue(latestEndPropId);
-        const leParsed = parseSabidurianDate(leVal);
-        if (leParsed) {
-          latestEnd = leParsed;
-          latestEndYear = sabidurianDateToYear(leParsed);
-        }
-      }
-      let fuzzyOnly = false;
-      if (!startDate && earliestStart) {
-        startDate = earliestStart;
-        fuzzyOnly = true;
-      }
-      if (!endDate && latestEnd) {
-        endDate = latestEnd;
-      }
-      if (!startDate) continue;
-      const file = entry.file;
-      if (!file) continue;
-      let startYear = sabidurianDateToYear(startDate);
-      let endYear = endDate ? sabidurianDateToYear(endDate) : startYear;
-      if (!enableBCE && (startYear < 1 || endYear < 1)) continue;
-      let effectiveStart = startDate;
-      let effectiveEnd = endDate;
-      if (endDate && endYear < startYear) {
-        const tmp = endYear;
-        endYear = startYear;
-        startYear = tmp;
-        effectiveStart = endDate;
-        effectiveEnd = startDate;
-      }
-      let isOngoing = false;
-      if (!endDate && startDate) {
-        const now = /* @__PURE__ */ new Date();
-        const currentYear = now.getFullYear() + now.getMonth() / 12 + now.getDate() / 365;
-        isOngoing = true;
-        endYear = currentYear;
-      }
-      const pointThreshold = ((_a = this.currentScale) == null ? void 0 : _a.id) === "day" ? 0 : 1e-3;
-      const isPoint = !isOngoing && (!endDate || Math.abs(endYear - startYear) <= pointThreshold);
-      const colorVal = colorPropId ? entry.getValue(colorPropId) : null;
-      const colorStr = colorVal ? colorVal.toString() : "";
-      const color = getColorForValue(colorStr);
-      const properties = {};
-      if (this.allProperties) {
-        for (const propId of this.allProperties) {
-          const val = entry.getValue(propId);
-          if (val) {
-            const name = this.config.getDisplayName(propId);
-            properties[name] = val.toString();
-          }
-        }
-      }
-      const depVal = depPropName ? entry.getValue(depPropName) : null;
-      const dependencies = this.resolveDependencies(depVal);
-      if (earliestStartYear !== void 0 && earliestStartYear > startYear) {
-        earliestStartYear = startYear;
-      }
-      if (latestEndYear !== void 0 && latestEndYear < endYear) {
-        latestEndYear = endYear;
-      }
-      const lockedPropName = this.plugin.settings.lockedProperty || "locked";
-      const lockedVal = entry.getValue(lockedPropName);
-      const locked = lockedVal === true || lockedVal === "true" || String(lockedVal) === "true";
-      result.push({
-        file,
-        label: file.basename,
-        start: effectiveStart,
-        end: effectiveEnd,
-        startYear,
-        endYear,
-        isPoint,
-        isOngoing,
-        locked,
-        fuzzyOnly,
-        earliestStart,
-        latestEnd,
-        earliestStartYear,
-        latestEndYear,
-        color,
-        colorValue: colorStr,
-        row: 0,
-        x: 0,
-        width: 0,
-        dependencies,
-        properties
-      });
-    }
-    return result;
-  }
-  /**
-   * Resolve a `blocked-by` frontmatter value into an array of file paths.
-   * Accepts: array of wikilinks like ["[[Task A]]"], single wikilink, or string.
-   */
-  resolveDependencies(val) {
-    if (!val) return [];
-    const items = Array.isArray(val) ? val.map(String) : [String(val)];
-    const paths = [];
-    for (const item of items) {
-      const match = item.match(/^\[\[(.+?)\]\]$/);
-      const noteName = match ? match[1] : item.trim();
-      if (!noteName) continue;
-      const file = this.plugin.app.metadataCache.getFirstLinkpathDest(noteName, "");
-      if (file) {
-        paths.push(file.path);
-      }
-    }
-    return paths;
-  }
-  /**
-   * Detect cycles in the dependency graph and warn via Notice.
-   * Simple DFS-based cycle detection.
-   */
-  detectCycles(entries) {
-    const graph = /* @__PURE__ */ new Map();
-    for (const entry of entries) {
-      graph.set(entry.file.path, entry.dependencies);
-    }
-    const visited = /* @__PURE__ */ new Set();
-    const inStack = /* @__PURE__ */ new Set();
-    let hasCycle = false;
-    const dfs = (node) => {
-      var _a;
-      if (inStack.has(node)) {
-        hasCycle = true;
-        return;
-      }
-      if (visited.has(node)) return;
-      visited.add(node);
-      inStack.add(node);
-      for (const dep of (_a = graph.get(node)) != null ? _a : []) {
-        dfs(dep);
-        if (hasCycle) return;
-      }
-      inStack.delete(node);
-    };
-    for (const path of graph.keys()) {
-      dfs(path);
-      if (hasCycle) break;
-    }
-    if (hasCycle) {
-      new import_obsidian6.Notice(
-        "Time & Line: Circular dependency detected in blocked-by chain!",
-        8e3
-      );
-    }
-  }
-  computeViewBounds(entries, includeToday = false) {
-    var _a, _b;
-    let minYear = Infinity;
-    let maxYear = -Infinity;
-    for (const e of entries) {
-      const effStart = (_a = e.earliestStartYear) != null ? _a : e.startYear;
-      const effEnd = (_b = e.latestEndYear) != null ? _b : e.endYear;
-      if (effStart < minYear) minYear = effStart;
-      if (e.startYear > maxYear) maxYear = e.startYear;
-      if (effEnd < minYear) minYear = effEnd;
-      if (effEnd > maxYear) maxYear = effEnd;
-    }
-    if (includeToday && minYear !== Infinity) {
-      const now = /* @__PURE__ */ new Date();
-      const y = now.getFullYear();
-      const startMs = new Date(y, 0, 1).getTime();
-      const endMs = new Date(y + 1, 0, 1).getTime();
-      const todayFrac = y + (now.getTime() - startMs) / (endMs - startMs);
-      const dataRange = maxYear - minYear || 1;
-      const nearWindow = Math.max(dataRange, 1);
-      if (todayFrac < minYear && minYear - todayFrac <= nearWindow) {
-        minYear = todayFrac;
-      } else if (todayFrac > maxYear && todayFrac - maxYear <= nearWindow) {
-        maxYear = todayFrac;
-      }
-    }
-    const range = maxYear - minYear || 1;
-    const padding = range * VIEW_PADDING_RATIO;
-    return {
-      viewStart: minYear - padding,
-      viewEnd: maxYear + padding,
-      range
-    };
-  }
-  renderControls(entryCount) {
-    var _a, _b;
-    if (!this.rootEl) return;
-    const controlsEl = this.rootEl.createDiv({ cls: "sabidurian-controls" });
-    controlsEl.createEl("span", {
-      cls: "sabidurian-controls-info",
-      text: `${entryCount} entries`
-    });
-    const scaleSelect = controlsEl.createEl("select", { cls: "sabidurian-scale-select" });
-    for (const scale of SCALES) {
-      const opt = scaleSelect.createEl("option", { value: scale.id, text: scale.label });
-      if (this.currentScale && scale.id === this.currentScale.id) {
-        opt.selected = true;
-      }
-    }
-    scaleSelect.addEventListener("change", () => {
-      this.config.set("scaleId", scaleSelect.value);
-      this.onDataUpdated();
-    });
-    const todayBtn = controlsEl.createEl("button", {
-      cls: "sabidurian-today-btn",
-      text: "Today"
-    });
-    todayBtn.addEventListener("click", () => {
-      this.scrollToToday();
-    });
-    const showTableConfig = (_a = this.config.get("showTable")) != null ? _a : true;
-    const tableBtn = controlsEl.createEl("button", {
-      cls: "sabidurian-today-btn sabidurian-table-toggle-btn",
-      text: showTableConfig ? "Hide Table" : "Show Table"
-    });
-    tableBtn.addEventListener("click", () => {
-      this.config.set("showTable", !showTableConfig);
-      this.onDataUpdated();
-    });
-    const showArrows = (_b = this.config.get("showArrows")) != null ? _b : true;
-    const arrowsBtn = controlsEl.createEl("button", {
-      cls: "sabidurian-today-btn sabidurian-arrows-toggle-btn",
-      text: showArrows ? "Hide Arrows" : "Show Arrows"
-    });
-    arrowsBtn.addEventListener("click", () => {
-      this.config.set("showArrows", !showArrows);
-      this.onDataUpdated();
-    });
-    const lockBtn = controlsEl.createEl("button", {
-      cls: `sabidurian-today-btn sabidurian-lock-btn${this._locked ? " sabidurian-lock-active" : ""}`
-    });
-    const lockIconSpan = lockBtn.createSpan({ cls: "sabidurian-lock-icon" });
-    (0, import_obsidian6.setIcon)(lockIconSpan, this._locked ? "lock" : "unlock");
-    lockBtn.createSpan({ text: this._locked ? "Locked" : "Lock" });
-    lockBtn.addEventListener("click", () => {
-      var _a2;
-      const currentLock = (_a2 = this.config.get("locked")) != null ? _a2 : false;
-      this.config.set("locked", !currentLock);
-      this.onDataUpdated();
-    });
-    const measureBtn = controlsEl.createEl("button", {
-      cls: "sabidurian-today-btn sabidurian-measure-btn",
-      attr: { "aria-label": "Measure distance" }
-    });
-    const measureIconSpan = measureBtn.createSpan({ cls: "sabidurian-lock-icon" });
-    (0, import_obsidian6.setIcon)(measureIconSpan, "ruler");
-    measureBtn.createSpan({ text: "Measure" });
-    measureBtn.addEventListener("click", () => {
-      var _a2;
-      if ((_a2 = this.measureManager) == null ? void 0 : _a2.isActive) {
-        this.measureManager.deactivate();
-        measureBtn.classList.remove("sabidurian-measure-active");
-      } else if (this.measureManager) {
-        this.measureManager.activate();
-        measureBtn.classList.add("sabidurian-measure-active");
-      }
-    });
-  }
-  renderSkeleton() {
-    this.scrollEl.querySelectorAll(":scope > .sabidurian-container").forEach((el) => el.remove());
-    this.rootEl = this.scrollEl.createDiv({ cls: "sabidurian-container" });
-    const skeleton = this.rootEl.createDiv({ cls: "sabidurian-skeleton" });
-    const widths = [65, 40, 80, 55, 45];
-    for (const w of widths) {
-      const bar = skeleton.createDiv({ cls: "sabidurian-skeleton-bar" });
-      bar.style.width = `${w}%`;
-    }
-  }
-  renderEmptyState(message) {
-    if (!this.rootEl) return;
-    const empty = this.rootEl.createDiv({ cls: "sabidurian-empty" });
-    empty.createDiv({ cls: "sabidurian-empty-icon", text: "\u{1F4C5}" });
-    empty.createEl("p", { text: message != null ? message : "No entries found." });
-    empty.createEl("p", {
-      text: "Add date properties to your notes and configure the Start date option above.",
-      cls: "sabidurian-hint"
-    });
-  }
-  /**
-   * Convert a fractional year to a YAML-friendly date string at the given
-   * precision. Precision defaults to the current scale's write precision
-   * (or 'day' if none is set).
-   */
-  yearToDateStr(fractionalYear, precision) {
-    var _a, _b;
-    const p = (_b = precision != null ? precision : (_a = this.currentScale) == null ? void 0 : _a.writePrecision) != null ? _b : "day";
-    return yearToYAMLString(fractionalYear, p);
-  }
-  /**
-   * Precision to use when writing back drag-modified dates for a specific
-   * entry: the finer of the original date's precision and the current scale's
-   * write precision.
-   */
-  entryWritePrecision(entry, which) {
-    var _a, _b;
-    const date = which === "start" ? entry.start : entry.end;
-    const origPrecision = date ? getDatePrecision(date) : "day";
-    const scalePrecision = (_b = (_a = this.currentScale) == null ? void 0 : _a.writePrecision) != null ? _b : "day";
-    return maxPrecision(origPrecision, scalePrecision);
-  }
-  onunload() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k;
-    (_a = this.dragManager) == null ? void 0 : _a.destroy();
-    this.dragManager = null;
-    (_b = this.arrowDragManager) == null ? void 0 : _b.destroy();
-    this.arrowDragManager = null;
-    (_c = this.contextMenuManager) == null ? void 0 : _c.destroy();
-    this.contextMenuManager = null;
-    (_d = this.keyboardManager) == null ? void 0 : _d.destroy();
-    this.keyboardManager = null;
-    (_e = this.selectionManager) == null ? void 0 : _e.destroy();
-    this.selectionManager = null;
-    (_f = this.touchManager) == null ? void 0 : _f.destroy();
-    this.touchManager = null;
-    (_g = this.arrowRenderer) == null ? void 0 : _g.destroy();
-    this.arrowRenderer = null;
-    (_h = this.groupHeaderRenderer) == null ? void 0 : _h.destroy();
-    this.groupHeaderRenderer = null;
-    (_i = this.barRenderer) == null ? void 0 : _i.destroy();
-    this.barRenderer = null;
-    (_j = this.sideTableRenderer) == null ? void 0 : _j.destroy();
-    this.sideTableRenderer = null;
-    (_k = this.rootEl) == null ? void 0 : _k.remove();
-    this.rootEl = null;
-  }
-};
-
-// src/SequenceView.ts
-var import_obsidian7 = require("obsidian");
-
-// src/scale/SequenceScale.ts
-function createSequenceScale(occupiedPositions, dense = false) {
-  let densePositions = null;
-  if (dense && occupiedPositions && occupiedPositions.length > 0) {
-    densePositions = [...new Set(occupiedPositions)].sort((a, b) => a - b);
-  }
-  return {
-    id: "sequence",
-    label: "Sequence",
-    unitDurationYears: 1,
-    // Each step = 1 unit in axis space
-    supportsSubYear: false,
-    supportsBCE: false,
-    getColumnBoundaries(start, end) {
-      const cols = [];
-      if (densePositions) {
-        for (let i = 0; i < densePositions.length; i++) {
-          const denseIdx = i + 1;
-          if (denseIdx + 1 < start) continue;
-          if (denseIdx > end) break;
-          cols.push({
-            start: denseIdx,
-            end: denseIdx + 1,
-            label: String(densePositions[i])
-            // Original order as label
-          });
-          if (cols.length > 500) break;
-        }
-      } else {
-        let step = Math.max(1, Math.floor(start));
-        const maxStep = Math.ceil(end);
-        while (step <= maxStep && cols.length < 500) {
-          cols.push({
-            start: step,
-            end: step + 1,
-            label: String(step)
-          });
-          step++;
-        }
-      }
-      return cols;
-    },
-    snapToUnit(pos) {
-      return Math.round(pos);
-    }
-  };
-}
-
 // src/SequenceView.ts
 var VIEW_PADDING = 0.5;
 var MIN_TIMELINE_HEIGHT2 = 200;
 var CULLING_THRESHOLD2 = 150;
 var SYSTEM_PROP_PREFIXES2 = ["file.", "formula."];
 var STEP_WIDTH_PX = 100;
-var SequenceView = class extends import_obsidian7.BasesView {
+var SequenceView = class extends import_obsidian9.BasesView {
   constructor(controller, scrollEl, plugin) {
+    var _a;
     super(controller);
     this.type = "sabidurian-sequence";
     this.rootEl = null;
@@ -4917,12 +6224,14 @@ var SequenceView = class extends import_obsidian7.BasesView {
     this._orderEndPropName = null;
     /** In dense mode, maps dense index (0-based) → original order value. Null when sparse. */
     this._denseToSparse = null;
+    this.refreshColors = () => this.onDataUpdated();
     this.scrollEl = scrollEl;
     this.plugin = plugin;
+    (_a = plugin.colorSubscribers) == null ? void 0 : _a.add(this.refreshColors);
     this.renderSkeleton();
   }
   onDataUpdated() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o;
     const prevScrollLeft = (_b = (_a = this.timelineRenderer) == null ? void 0 : _a.element.scrollLeft) != null ? _b : 0;
     const prevScrollTop = (_d = (_c = this.timelineRenderer) == null ? void 0 : _c.element.scrollTop) != null ? _d : 0;
     this.destroyManagers();
@@ -4988,7 +6297,7 @@ var SequenceView = class extends import_obsidian7.BasesView {
       return;
     }
     if (sabidurianEntries.length > this.plugin.settings.maxEntries) {
-      new import_obsidian7.Notice(
+      new import_obsidian9.Notice(
         `Time & Line: ${sabidurianEntries.length} entries exceed the ${this.plugin.settings.maxEntries} limit. Performance may degrade.`,
         8e3
       );
@@ -5072,6 +6381,7 @@ var SequenceView = class extends import_obsidian7.BasesView {
         this.plugin.app,
         savedTableWidth
       );
+      this.sideTableRenderer.propertyColors = (_l = this.plugin.settings.propertyColors) != null ? _l : {};
       if (isGrouped) {
         this.sideTableRenderer.renderGrouped(
           sabidurianGroups,
@@ -5100,7 +6410,7 @@ var SequenceView = class extends import_obsidian7.BasesView {
     }
     this.timelineRenderer = new TimelineRenderer(contentEl);
     this.timelineRenderer.render(columns, this.axis, canvasHeight, false);
-    this._showArrows = (_l = this.config.get("showArrows")) != null ? _l : true;
+    this._showArrows = (_m = this.config.get("showArrows")) != null ? _m : true;
     this._isGrouped = isGrouped;
     this.allVisibleEntries = visibleEntries;
     this.cullingActive = visibleEntries.length > CULLING_THRESHOLD2;
@@ -5113,6 +6423,7 @@ var SequenceView = class extends import_obsidian7.BasesView {
     );
     this.barRenderer.sequenceMode = true;
     this.barRenderer.denseToSparse = this._denseToSparse;
+    this.barRenderer.propertyColors = (_n = this.plugin.settings.propertyColors) != null ? _n : {};
     const barDisplayProps = [];
     for (const key of ["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"]) {
       const val = this.config.get(key);
@@ -5125,7 +6436,7 @@ var SequenceView = class extends import_obsidian7.BasesView {
       this.plugin.settings.barPropertyMinWidth,
       this.plugin.settings.showBarProperties
     );
-    const focusTagRaw = ((_m = this.config.get("focusTag")) == null ? void 0 : _m.trim()) || null;
+    const focusTagRaw = ((_o = this.config.get("focusTag")) == null ? void 0 : _o.trim()) || null;
     this.barRenderer.setFocusTag(focusTagRaw ? focusTagRaw.replace(/^#/, "") : null);
     if (isGrouped) {
       this.groupHeaderRenderer = new GroupHeaderRenderer(
@@ -5278,6 +6589,7 @@ var SequenceView = class extends import_obsidian7.BasesView {
       this.currentScale
     );
     this.contextMenuManager.lockedProperty = this.plugin.settings.lockedProperty || "locked";
+    this.contextMenuManager.viewLocked = this._locked;
     this.contextMenuManager.attach(
       entriesToRender,
       (row) => this.layoutEngine.getRowY(row)
@@ -5301,13 +6613,14 @@ var SequenceView = class extends import_obsidian7.BasesView {
     );
     this.keyboardManager.attach(this.allVisibleEntries);
     this.keyboardManager.setDeleteEntryCallback(async (entry) => {
+      if (this._locked || entry.locked) return;
       const confirmed = await confirmAction(this.plugin.app, "Delete entry", `Delete "${entry.label}"? This will move the file to trash.`);
-      if (!confirmed) return;
+      if (!confirmed || this._locked || entry.locked) return;
       try {
         await this.plugin.app.vault.trash(entry.file, true);
-        new import_obsidian7.Notice(`Deleted "${entry.label}"`);
+        new import_obsidian9.Notice(`Deleted "${entry.label}"`);
       } catch (err) {
-        new import_obsidian7.Notice(`Failed to delete: ${err}`);
+        new import_obsidian9.Notice(`Failed to delete: ${err}`);
       }
     });
     if (isTouchDevice()) {
@@ -5389,7 +6702,7 @@ var SequenceView = class extends import_obsidian7.BasesView {
       const effectiveEndPos = isSingleStep ? startPos + 1 : endPos + 1;
       const colorVal = colorPropId ? entry.getValue(colorPropId) : null;
       const colorStr = colorVal ? colorVal.toString() : "";
-      const color = getColorForValue(colorStr);
+      const color = getColorForValue(colorStr, colorPropId != null ? colorPropId : "", this.plugin.settings.propertyColors);
       const properties = {};
       if (this.allProperties) {
         for (const propId of this.allProperties) {
@@ -5475,7 +6788,7 @@ var SequenceView = class extends import_obsidian7.BasesView {
       if (hasCycle) break;
     }
     if (hasCycle) {
-      new import_obsidian7.Notice("Time & Line: Circular dependency detected in blocked-by chain!", 8e3);
+      new import_obsidian9.Notice("Time & Line: Circular dependency detected in blocked-by chain!", 8e3);
     }
   }
   // ─── UI helpers ───
@@ -5555,7 +6868,7 @@ var SequenceView = class extends import_obsidian7.BasesView {
       cls: `sabidurian-today-btn sabidurian-lock-btn${this._locked ? " sabidurian-lock-active" : ""}`
     });
     const lockIconSpan = lockBtn.createSpan({ cls: "sabidurian-lock-icon" });
-    (0, import_obsidian7.setIcon)(lockIconSpan, this._locked ? "lock" : "unlock");
+    (0, import_obsidian9.setIcon)(lockIconSpan, this._locked ? "lock" : "unlock");
     lockBtn.createSpan({ text: this._locked ? "Locked" : "Lock" });
     lockBtn.addEventListener("click", () => {
       var _a2;
@@ -5608,137 +6921,13 @@ var SequenceView = class extends import_obsidian7.BasesView {
     this.sideTableRenderer = null;
   }
   onunload() {
-    var _a;
+    var _a, _b;
+    (_a = this.plugin.colorSubscribers) == null ? void 0 : _a.delete(this.refreshColors);
     this.destroyManagers();
-    (_a = this.rootEl) == null ? void 0 : _a.remove();
+    (_b = this.rootEl) == null ? void 0 : _b.remove();
     this.rootEl = null;
   }
 };
-
-// src/viewOptions.ts
-function getViewOptions(config) {
-  const scaleOptions = { auto: "Auto" };
-  for (const scale of SCALES) {
-    scaleOptions[scale.id] = scale.label;
-  }
-  return [
-    // ── Property selectors ──
-    {
-      type: "property",
-      key: "startDateProp",
-      displayName: "Start date",
-      placeholder: "Select property\u2026"
-    },
-    {
-      type: "property",
-      key: "endDateProp",
-      displayName: "End date",
-      placeholder: "Select property\u2026"
-    },
-    {
-      type: "property",
-      key: "colorProp",
-      displayName: "Color by",
-      placeholder: "Select property\u2026"
-    },
-    {
-      type: "property",
-      key: "dependencyProp",
-      displayName: "Dependency property",
-      placeholder: "e.g. blocked-by"
-    },
-    {
-      type: "property",
-      key: "earliestStartProp",
-      displayName: "Earliest start",
-      placeholder: "Uncertainty: earliest possible start"
-    },
-    {
-      type: "property",
-      key: "latestEndProp",
-      displayName: "Latest end",
-      placeholder: "Uncertainty: latest possible end"
-    },
-    // ── Bar property badges ──
-    {
-      type: "property",
-      key: "barDisplayProp1",
-      displayName: "Bar property 1",
-      placeholder: "Property shown on bars"
-    },
-    {
-      type: "property",
-      key: "barDisplayProp2",
-      displayName: "Bar property 2",
-      placeholder: "Second property on bars"
-    },
-    {
-      type: "property",
-      key: "barDisplayProp3",
-      displayName: "Bar property 3",
-      placeholder: "Third property on bars"
-    },
-    // ── Scale ──
-    {
-      type: "dropdown",
-      key: "scaleId",
-      displayName: "Default scale",
-      default: "auto",
-      options: scaleOptions
-    },
-    // ── Initial scroll position (on view open) ──
-    {
-      type: "dropdown",
-      key: "initialScroll",
-      displayName: "Open view at",
-      default: "today",
-      options: {
-        today: "Today",
-        start: "Start of data",
-        end: "End of data"
-      }
-    },
-    // ── Focus filter ──
-    {
-      type: "text",
-      key: "focusTag",
-      displayName: "Focus tag",
-      placeholder: "e.g. project \u2014 unfocused items are greyed out"
-    },
-    // ── Display toggles ──
-    {
-      type: "toggle",
-      key: "showTable",
-      displayName: "Show side table",
-      default: true
-    },
-    {
-      type: "toggle",
-      key: "showArrows",
-      displayName: "Show dependencies",
-      default: true
-    },
-    {
-      type: "toggle",
-      key: "showToday",
-      displayName: "Show today marker",
-      default: true
-    },
-    // ── Historical group ──
-    {
-      type: "group",
-      displayName: "Historical",
-      items: [
-        {
-          type: "toggle",
-          key: "enableBCE",
-          displayName: "Enable BCE dates",
-          default: true
-        }
-      ]
-    }
-  ];
-}
 
 // src/sequenceViewOptions.ts
 function getSequenceViewOptions(config) {
@@ -5817,8 +7006,9 @@ function getSequenceViewOptions(config) {
 }
 
 // src/settings.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 var DEFAULT_SETTINGS = {
+  propertyColors: {},
   weekStart: 1,
   // Monday
   dependencyProperty: "blocked-by",
@@ -5839,7 +7029,7 @@ var MARKER_COLORS = {
   "Accent": "var(--interactive-accent)",
   "Muted": "var(--text-muted)"
 };
-var SabidurianSettingTab = class extends import_obsidian8.PluginSettingTab {
+var SabidurianSettingTab = class extends import_obsidian10.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -5848,19 +7038,19 @@ var SabidurianSettingTab = class extends import_obsidian8.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Time & Line" });
-    new import_obsidian8.Setting(containerEl).setName("Week starts on").setDesc("Which day of the week is treated as the first day.").addDropdown((dropdown) => {
+    new import_obsidian10.Setting(containerEl).setName("Week starts on").setDesc("Which day of the week is treated as the first day.").addDropdown((dropdown) => {
       dropdown.addOption("0", "Sunday").addOption("1", "Monday").setValue(String(this.plugin.settings.weekStart)).onChange(async (value) => {
         this.plugin.settings.weekStart = parseInt(value, 10);
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian8.Setting(containerEl).setName("Default dependency property").setDesc("Frontmatter property name used to declare dependencies (e.g. blocked-by).").addText((text) => {
+    new import_obsidian10.Setting(containerEl).setName("Default dependency property").setDesc("Frontmatter property name used to declare dependencies (e.g. blocked-by).").addText((text) => {
       text.setPlaceholder("blocked-by").setValue(this.plugin.settings.dependencyProperty).onChange(async (value) => {
         this.plugin.settings.dependencyProperty = value.trim() || "blocked-by";
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian8.Setting(containerEl).setName("Max entries before warning").setDesc("Show a performance warning when a Base exceeds this number of entries.").addText((text) => {
+    new import_obsidian10.Setting(containerEl).setName("Max entries before warning").setDesc("Show a performance warning when a Base exceeds this number of entries.").addText((text) => {
       text.setPlaceholder("5000").setValue(String(this.plugin.settings.maxEntries)).onChange(async (value) => {
         const num = parseInt(value, 10);
         if (!isNaN(num) && num > 0) {
@@ -5869,39 +7059,60 @@ var SabidurianSettingTab = class extends import_obsidian8.PluginSettingTab {
         }
       });
     });
-    new import_obsidian8.Setting(containerEl).setName("Show property badges on bars").setDesc("Display configured bar properties as compact badges. Properties are selected per-view in the Bases Configure panel.").addToggle((toggle) => {
+    new import_obsidian10.Setting(containerEl).setName("Show property badges on bars").setDesc("Display configured bar properties as compact badges. Properties are selected per-view in the Bases Configure panel.").addToggle((toggle) => {
       toggle.setValue(this.plugin.settings.showBarProperties).onChange(async (value) => {
         this.plugin.settings.showBarProperties = value;
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian8.Setting(containerEl).setName("Badge minimum bar width").setDesc("Only show property badges when the bar is at least this many pixels wide.").addText((text) => {
-      text.setPlaceholder("80").setValue(String(this.plugin.settings.barPropertyMinWidth)).onChange(async (value) => {
-        const num = parseInt(value, 10);
-        if (!isNaN(num) && num > 0) {
-          this.plugin.settings.barPropertyMinWidth = num;
+    containerEl.createEl("h3", { text: "Property colors" });
+    containerEl.createEl("p", { text: "Use the same muted color for a value in timeline bars, badges and editable Bases tables." });
+    for (const [property, values] of Object.entries(this.plugin.settings.propertyColors)) {
+      for (const [value, tone] of Object.entries(values)) {
+        new import_obsidian10.Setting(containerEl).setName(value).setDesc(property).addDropdown((dropdown) => {
+          for (const color of COLOR_TONES) dropdown.addOption(color, color[0].toUpperCase() + color.slice(1));
+          dropdown.setValue(tone).onChange(async (color) => {
+            values[value] = color;
+            await this.plugin.saveSettings();
+          });
+        }).addExtraButton((button) => button.setIcon("x").setTooltip("Remove color").onClick(async () => {
+          delete values[value];
           await this.plugin.saveSettings();
-        }
-      });
-    });
-    new import_obsidian8.Setting(containerEl).setName("Lock on mobile").setDesc("Automatically lock the timeline on touch/mobile devices to prevent accidental edits.").addToggle((toggle) => {
+          this.display();
+        }));
+      }
+    }
+    let newProperty = "", newValue = "";
+    new import_obsidian10.Setting(containerEl).setName("Add a value color").addText((text) => text.setPlaceholder("Property, e.g. Dish").onChange((value) => {
+      newProperty = value.trim();
+    })).addText((text) => text.setPlaceholder("Exact property value").onChange((value) => {
+      newValue = value.trim();
+    })).addButton((button) => button.setButtonText("Add").onClick(async () => {
+      if (!newProperty || !newValue) return;
+      const colors = this.plugin.settings.propertyColors;
+      if (!Object.prototype.hasOwnProperty.call(colors, newProperty)) Object.defineProperty(colors, newProperty, { value: {}, enumerable: true, configurable: true, writable: true });
+      Object.defineProperty(colors[newProperty], newValue, { value: "gray", enumerable: true, configurable: true, writable: true });
+      await this.plugin.saveSettings();
+      this.display();
+    }));
+    new import_obsidian10.Setting(containerEl).setName("Lock on mobile").setDesc("Automatically lock the timeline on touch/mobile devices to prevent accidental edits.").addToggle((toggle) => {
       toggle.setValue(this.plugin.settings.lockOnMobile).onChange(async (value) => {
         this.plugin.settings.lockOnMobile = value;
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian8.Setting(containerEl).setName("Locked property name").setDesc("Frontmatter property used to lock individual notes from drag/resize (e.g. locked).").addText((text) => {
+    new import_obsidian10.Setting(containerEl).setName("Locked property name").setDesc("Frontmatter property used to lock individual notes from drag/resize (e.g. locked).").addText((text) => {
       text.setPlaceholder("locked").setValue(this.plugin.settings.lockedProperty).onChange(async (value) => {
         this.plugin.settings.lockedProperty = value.trim() || "locked";
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian8.Setting(containerEl).setName("Calendar markers").setHeading();
+    new import_obsidian10.Setting(containerEl).setName("Calendar markers").setHeading();
     const markers = this.plugin.settings.markers;
     for (let i = 0; i < markers.length; i++) {
       const marker = markers[i];
       const desc = marker.date ? marker.date : `${marker.start || "?"} \u2192 ${marker.end || "?"}`;
-      const s = new import_obsidian8.Setting(containerEl);
+      const s = new import_obsidian10.Setting(containerEl);
       s.setName(marker.label || "Untitled marker");
       s.setDesc(desc);
       s.addToggle(
@@ -5923,14 +7134,14 @@ var SabidurianSettingTab = class extends import_obsidian8.PluginSettingTab {
         })
       );
     }
-    new import_obsidian8.Setting(containerEl).addButton(
+    new import_obsidian10.Setting(containerEl).addButton(
       (btn) => btn.setButtonText("Add marker").setCta().onClick(() => {
         new MarkerModal(this.app, this.plugin, null, -1).open();
       })
     );
   }
 };
-var MarkerModal = class extends import_obsidian8.Modal {
+var MarkerModal = class extends import_obsidian10.Modal {
   constructor(app, plugin, marker, index) {
     super(app);
     this.label = "";
@@ -5959,12 +7170,12 @@ var MarkerModal = class extends import_obsidian8.Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("h3", { text: this.marker ? "Edit Marker" : "Add Marker" });
-    new import_obsidian8.Setting(contentEl).setName("Label").addText(
+    new import_obsidian10.Setting(contentEl).setName("Label").addText(
       (t) => t.setValue(this.label).setPlaceholder("Sprint 5").onChange((v) => {
         this.label = v;
       })
     );
-    new import_obsidian8.Setting(contentEl).setName("Type").addDropdown(
+    new import_obsidian10.Setting(contentEl).setName("Type").addDropdown(
       (d) => d.addOption("line", "Vertical line (single date)").addOption("band", "Shaded band (date range)").setValue(this.markerType).onChange((v) => {
         this.markerType = v;
         this.renderDateFields(contentEl);
@@ -5972,7 +7183,7 @@ var MarkerModal = class extends import_obsidian8.Modal {
     );
     const dateContainer = contentEl.createDiv({ cls: "sabidurian-marker-date-fields" });
     this.renderDateFields(contentEl);
-    new import_obsidian8.Setting(contentEl).setName("Color").addDropdown((d) => {
+    new import_obsidian10.Setting(contentEl).setName("Color").addDropdown((d) => {
       for (const [name, val] of Object.entries(MARKER_COLORS)) {
         d.addOption(val, name);
       }
@@ -5980,7 +7191,7 @@ var MarkerModal = class extends import_obsidian8.Modal {
         this.color = v;
       });
     });
-    new import_obsidian8.Setting(contentEl).addButton(
+    new import_obsidian10.Setting(contentEl).addButton(
       (btn) => btn.setButtonText("Save").setCta().onClick(async () => {
         var _a;
         const newMarker = {
@@ -6011,7 +7222,7 @@ var MarkerModal = class extends import_obsidian8.Modal {
   renderDateFields(contentEl) {
     contentEl.querySelectorAll(".sabidurian-marker-date-field").forEach((el) => el.remove());
     if (this.markerType === "line") {
-      const s = new import_obsidian8.Setting(contentEl);
+      const s = new import_obsidian10.Setting(contentEl);
       s.settingEl.classList.add("sabidurian-marker-date-field");
       s.setName("Date").setDesc("e.g. 2025-07-01, -500, 1066");
       s.addText(
@@ -6020,7 +7231,7 @@ var MarkerModal = class extends import_obsidian8.Modal {
         })
       );
     } else {
-      const s1 = new import_obsidian8.Setting(contentEl);
+      const s1 = new import_obsidian10.Setting(contentEl);
       s1.settingEl.classList.add("sabidurian-marker-date-field");
       s1.setName("Start date");
       s1.addText(
@@ -6028,7 +7239,7 @@ var MarkerModal = class extends import_obsidian8.Modal {
           this.start = v;
         })
       );
-      const s2 = new import_obsidian8.Setting(contentEl);
+      const s2 = new import_obsidian10.Setting(contentEl);
       s2.settingEl.classList.add("sabidurian-marker-date-field");
       s2.setName("End date");
       s2.addText(
@@ -6043,16 +7254,119 @@ var MarkerModal = class extends import_obsidian8.Modal {
   }
 };
 
+// src/renderer/NativeTableColors.ts
+var CELL = ".bases-td[data-property]";
+var COLOR_ATTRIBUTE = "data-sabidurian-color";
+var NativeTableColors = class {
+  constructor(root, resolve) {
+    this.root = root;
+    this.resolve = resolve;
+    this.marked = /* @__PURE__ */ new Set();
+    this.stopped = false;
+    this.onInput = (event) => {
+      const cell = this.closestCell(event.target);
+      if (cell) this.colorCell(cell);
+    };
+    const Observer = root.ownerDocument.defaultView.MutationObserver;
+    this.observer = new Observer((records) => {
+      const cells = /* @__PURE__ */ new Set();
+      for (const record of records) {
+        const cell = this.closestCell(record.target);
+        if (cell) cells.add(cell);
+        for (const node of Array.from(record.addedNodes)) this.collectCells(node, cells);
+      }
+      this.prune();
+      for (const cell of cells) if (this.root.contains(cell)) this.colorCell(cell);
+    });
+    this.observer.observe(root, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["data-property"]
+    });
+    root.addEventListener("input", this.onInput, true);
+    root.addEventListener("change", this.onInput, true);
+    this.refresh();
+  }
+  /** Reapply after palette settings change; ordinary cell changes are automatic. */
+  refresh() {
+    if (this.stopped) return;
+    this.prune();
+    const cells = /* @__PURE__ */ new Set();
+    this.collectCells(this.root, cells);
+    for (const cell of cells) this.colorCell(cell);
+  }
+  destroy() {
+    if (this.stopped) return;
+    this.stopped = true;
+    this.observer.disconnect();
+    this.root.removeEventListener("input", this.onInput, true);
+    this.root.removeEventListener("change", this.onInput, true);
+    for (const element of this.marked) element.removeAttribute(COLOR_ATTRIBUTE);
+    this.marked.clear();
+  }
+  closestCell(node) {
+    var _a;
+    const element = (node == null ? void 0 : node.nodeType) === 1 ? node : node == null ? void 0 : node.parentElement;
+    return (_a = element == null ? void 0 : element.closest(CELL)) != null ? _a : null;
+  }
+  collectCells(node, cells) {
+    if (node.nodeType !== 1) return;
+    const element = node;
+    if (element.matches(CELL)) cells.add(element);
+    for (const cell of Array.from(element.querySelectorAll(CELL))) cells.add(cell);
+  }
+  colorCell(cell) {
+    var _a, _b, _c, _d;
+    const property = ((_a = cell.getAttribute("data-property")) != null ? _a : "").replace(/^note\./, "");
+    const content = cell.querySelector(":scope > .bases-table-cell.bases-metadata-value");
+    const desired = /* @__PURE__ */ new Map();
+    const add = (element, value) => {
+      const color = value.trim() ? this.resolve(property, value.trim()) : null;
+      if (color && /^[a-z][a-z0-9-]*$/.test(color)) desired.set(element, color);
+    };
+    if (content) {
+      const pills = content.querySelectorAll(".multi-select-pill");
+      if (pills.length) {
+        for (const pill of Array.from(pills)) add(pill, (_c = (_b = pill.querySelector(".multi-select-pill-content")) == null ? void 0 : _b.textContent) != null ? _c : "");
+      } else {
+        const editor = content.querySelector(".metadata-input-longtext");
+        const input = content.querySelector('input:not([type="checkbox"]), textarea');
+        if (editor) add(cell, (_d = editor.textContent) != null ? _d : "");
+        else if (input) add(cell, input.value);
+      }
+    }
+    for (const marked of this.marked) {
+      if ((marked === cell || cell.contains(marked)) && !desired.has(marked)) this.clear(marked);
+    }
+    for (const [element, color] of desired) {
+      if (element.getAttribute(COLOR_ATTRIBUTE) !== color) element.setAttribute(COLOR_ATTRIBUTE, color);
+      this.marked.add(element);
+    }
+  }
+  prune() {
+    for (const element of this.marked) if (!this.root.contains(element)) this.clear(element);
+  }
+  clear(element) {
+    element.removeAttribute(COLOR_ATTRIBUTE);
+    this.marked.delete(element);
+  }
+};
+
 // src/main.ts
 var SABIDURIAN_VIEW_TYPE = "sabidurian-timeline";
 var SEQUENCE_VIEW_TYPE = "sabidurian-sequence";
-var SabidurianPlugin = class extends import_obsidian9.Plugin {
+var SabidurianPlugin = class extends import_obsidian11.Plugin {
   constructor() {
     super(...arguments);
+    this.colorSubscribers = /* @__PURE__ */ new Set();
+    this.tableColors = /* @__PURE__ */ new Map();
     this.settings = { ...DEFAULT_SETTINGS };
   }
   async onload() {
     await this.loadSettings();
+    this.history = new EditHistory((file, mutate) => this.app.fileManager.processFrontMatter(file, mutate));
     this.registerBasesView(SABIDURIAN_VIEW_TYPE, {
       name: "Timeline",
       icon: "lucide-chart-gantt",
@@ -6066,14 +7380,34 @@ var SabidurianPlugin = class extends import_obsidian9.Plugin {
       options: getSequenceViewOptions
     });
     this.addSettingTab(new SabidurianSettingTab(this.app, this));
+    const connectColors = (doc) => {
+      if (!this.tableColors.has(doc)) this.tableColors.set(doc, new NativeTableColors(
+        doc.body,
+        (property, value) => getPropertyTone(property, value, this.settings.propertyColors)
+      ));
+    };
+    connectColors(document);
+    this.app.workspace.iterateAllLeaves((leaf) => connectColors(leaf.view.containerEl.ownerDocument));
+    this.registerEvent(this.app.workspace.on("window-open", (_win, window2) => connectColors(window2.document)));
+    this.registerEvent(this.app.workspace.on("window-close", (_win, window2) => {
+      var _a;
+      (_a = this.tableColors.get(window2.document)) == null ? void 0 : _a.destroy();
+      this.tableColors.delete(window2.document);
+    }));
     this.app.workspace.trigger("parse-style-settings");
   }
   onunload() {
+    for (const colors of this.tableColors.values()) colors.destroy();
+    this.tableColors.clear();
+    this.colorSubscribers.clear();
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings.propertyColors = normalizePropertyColors(this.settings.propertyColors);
   }
   async saveSettings() {
     await this.saveData(this.settings);
+    for (const colors of this.tableColors.values()) colors.refresh();
+    for (const update of this.colorSubscribers) update();
   }
 };

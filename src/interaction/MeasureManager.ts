@@ -1,5 +1,5 @@
 /**
- * MeasureManager — Click two points on the timeline to see elapsed time.
+ * MeasureManager — Drag a span or click two points to measure time.
  *
  * State machine: idle → awaiting-a → awaiting-b → displaying → idle
  *
@@ -7,6 +7,7 @@
  */
 
 import { NumericAxis } from '../scale/NumericAxis';
+import { formatMeasureDuration } from '../utils/measureDuration';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -26,6 +27,8 @@ export class MeasureManager {
   private markerA: SVGElement | null = null;
   private markerB: SVGElement | null = null;
   private spanLine: SVGElement | null = null;
+  private gesture: { start: MeasurePoint; clientX: number; clientY: number; dragging: boolean } | null = null;
+  private suppressClick = false;
 
   /** When true, shows "N positions" instead of time units. */
   sequenceMode = false;
@@ -34,16 +37,29 @@ export class MeasureManager {
     private svg: SVGSVGElement,
     private containerEl: HTMLElement,
     private axis: NumericAxis,
-  ) {}
+    private hideTaskTooltip: () => void = () => {},
+  ) {
+    // Capture before task moving/resizing/creation, even when editing is unlocked.
+    svg.addEventListener('mousedown', this.onMouseDown, true);
+    svg.ownerDocument.addEventListener('mousemove', this.onMouseMove, true);
+    svg.ownerDocument.addEventListener('mouseup', this.onMouseUp, true);
+    svg.ownerDocument.defaultView?.addEventListener('blur', this.onBlur);
+  }
 
   activate(): void {
+    this.clearVisuals();
+    this.suppressClick = false;
+    this.hideTaskTooltip();
     this.state = 'awaiting-a';
     this.containerEl.classList.add('sabidurian-measure-mode');
   }
 
   deactivate(): void {
+    if (this.gesture) this.suppressClick = true;
+    this.gesture = null;
     this.state = 'idle';
     this.containerEl.classList.remove('sabidurian-measure-mode');
+    this.containerEl.querySelector('.sabidurian-measure-btn')?.classList.remove('sabidurian-measure-active');
     this.clearVisuals();
   }
 
@@ -52,22 +68,19 @@ export class MeasureManager {
   }
 
   handleClick(e: MouseEvent): boolean {
+    if (this.suppressClick) { this.suppressClick = false; return true; }
     if (this.state === 'idle') return false;
-
-    const rect = this.svg.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const year = this.axis.pixelToYear(x);
+    const point = this.pointAt(e);
 
     if (this.state === 'awaiting-a') {
-      this.pointA = { year, x, y };
+      this.pointA = point;
       this.renderMarker(this.pointA, 'a');
       this.state = 'awaiting-b';
       return true;
     }
 
     if (this.state === 'awaiting-b') {
-      this.pointB = { year, x, y };
+      this.pointB = point;
       this.renderMarker(this.pointB, 'b');
       this.renderMeasurement();
       this.state = 'displaying';
@@ -82,6 +95,50 @@ export class MeasureManager {
     return false;
   }
 
+  private pointAt(e: MouseEvent): MeasurePoint {
+    const rect = this.svg.getBoundingClientRect();
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    return { year: this.axis.pixelToYear(x), x, y };
+  }
+
+  private onMouseDown = (e: MouseEvent): void => {
+    this.suppressClick = false;
+    if (!this.isActive || e.button !== 0) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    this.gesture = { start: this.pointAt(e), clientX: e.clientX, clientY: e.clientY, dragging: false };
+  };
+
+  private onMouseMove = (e: MouseEvent): void => {
+    const gesture = this.gesture;
+    if (!gesture) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    if (!gesture.dragging) {
+      if (Math.hypot(e.clientX - gesture.clientX, e.clientY - gesture.clientY) < 4) return;
+      gesture.dragging = true;
+      if (this.state !== 'awaiting-b') {
+        this.clearVisuals();
+        this.pointA = gesture.start;
+        this.renderMarker(this.pointA, 'a');
+      }
+      this.state = 'awaiting-b';
+    }
+    this.pointB = this.pointAt(e);
+    this.renderMarker(this.pointB, 'b');
+    this.renderMeasurement();
+  };
+
+  private onMouseUp = (e: MouseEvent): void => {
+    if (!this.gesture || e.button !== 0) return;
+    // Also account for the final release position, including outside the SVG.
+    this.onMouseMove(e);
+    const dragged = this.gesture.dragging;
+    this.gesture = null;
+    if (dragged) { this.state = 'displaying'; this.suppressClick = true; }
+    // A plain click follows the existing two-click / click-to-clear flow.
+  };
+
+  private onBlur = (): void => { if (this.gesture) this.deactivate(); };
+
   handleKeydown(e: KeyboardEvent): boolean {
     if (e.key === 'Escape' && this.state !== 'idle') {
       this.deactivate();
@@ -91,7 +148,7 @@ export class MeasureManager {
   }
 
   private renderMarker(point: MeasurePoint, id: string): void {
-    const line = document.createElementNS(SVG_NS, 'line');
+    const line = (id === 'a' ? this.markerA : this.markerB) ?? this.svg.ownerDocument.createElementNS(SVG_NS, 'line');
     line.setAttribute('x1', `${point.x}`);
     line.setAttribute('x2', `${point.x}`);
     line.setAttribute('y1', '0');
@@ -112,7 +169,7 @@ export class MeasureManager {
 
     // Span line between markers
     const midY = Math.min(earlier.y, later.y) - 16;
-    const spanLine = document.createElementNS(SVG_NS, 'line');
+    const spanLine = this.spanLine ?? this.svg.ownerDocument.createElementNS(SVG_NS, 'line');
     spanLine.setAttribute('x1', `${earlier.x}`);
     spanLine.setAttribute('x2', `${later.x}`);
     spanLine.setAttribute('y1', `${midY}`);
@@ -124,19 +181,19 @@ export class MeasureManager {
     // Compute duration text
     const durationText = this.sequenceMode
       ? this.computeSequenceDistance(earlier.year, later.year)
-      : this.computeDuration(earlier.year, later.year);
+      : formatMeasureDuration(earlier.year, later.year);
 
     // Floating label — positioned inside the timeline scroll container
-    const overlay = document.createElement('div');
+    const overlay = this.overlayEl ?? this.svg.ownerDocument.createElement('div');
     overlay.classList.add('sabidurian-measure-label');
     overlay.textContent = durationText;
     const midX = (earlier.x + later.x) / 2;
-    // Ensure label stays within visible area (min top = 4px)
-    const labelTop = Math.max(4, midY - 28);
+    const timelineBody = this.containerEl.querySelector('.sabidurian-timeline-body');
+    // SVG coordinates include scrolling; keep the readout below the sticky header.
+    const labelTop = Math.max((timelineBody?.scrollTop ?? 0) + 4, midY - 28);
     overlay.style.left = `${midX}px`;
     overlay.style.top = `${labelTop}px`;
     // Append to the scrollable timeline body so it scrolls with content
-    const timelineBody = this.containerEl.querySelector('.sabidurian-timeline-body');
     if (timelineBody) {
       timelineBody.appendChild(overlay);
     } else {
@@ -144,31 +201,6 @@ export class MeasureManager {
       this.containerEl.appendChild(overlay);
     }
     this.overlayEl = overlay;
-  }
-
-  private computeDuration(yearA: number, yearB: number): string {
-    const diff = Math.abs(yearB - yearA);
-
-    if (diff >= 1) {
-      const years = Math.floor(diff);
-      const remainingMonths = Math.round((diff - years) * 12);
-      if (remainingMonths > 0 && years < 100) {
-        return `${years} year${years !== 1 ? 's' : ''}, ${remainingMonths} month${remainingMonths !== 1 ? 's' : ''}`;
-      }
-      return `~${years.toLocaleString()} year${years !== 1 ? 's' : ''}`;
-    }
-
-    const months = Math.floor(diff * 12);
-    if (months >= 1) {
-      const remainingDays = Math.round((diff * 365) - (months * 30.44));
-      if (remainingDays > 0) {
-        return `${months} month${months !== 1 ? 's' : ''}, ${remainingDays} day${remainingDays !== 1 ? 's' : ''}`;
-      }
-      return `${months} month${months !== 1 ? 's' : ''}`;
-    }
-
-    const days = Math.round(diff * 365);
-    return `${days} day${days !== 1 ? 's' : ''}`;
   }
 
   private computeSequenceDistance(posA: number, posB: number): string {
@@ -188,5 +220,9 @@ export class MeasureManager {
 
   destroy(): void {
     this.deactivate();
+    this.svg.removeEventListener('mousedown', this.onMouseDown, true);
+    this.svg.ownerDocument.removeEventListener('mousemove', this.onMouseMove, true);
+    this.svg.ownerDocument.removeEventListener('mouseup', this.onMouseUp, true);
+    this.svg.ownerDocument.defaultView?.removeEventListener('blur', this.onBlur);
   }
 }

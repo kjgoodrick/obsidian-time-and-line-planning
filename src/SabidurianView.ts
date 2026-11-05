@@ -1,11 +1,17 @@
+import { Scheduling } from './model/Scheduling';
+import { fullLabel, dependencyLinks } from './model/labels';
+import { iconLabel, resolveTaskIcon } from './model/taskIcons';
+import { TaskInspector, TaskPicker, NewTaskModal, type TaskFields } from './interaction/TaskInspector';
+import { axisToWallMs, wallToInstant, offsetISO, instantToWallMs, wallMsToAxis } from './utils/timezone';
 import { BasesView, Notice, QueryController, setIcon } from 'obsidian';
-import type { BasesPropertyId } from 'obsidian';
+import type { BasesPropertyId, TFile } from 'obsidian';
 import type SabidurianPlugin from './main';
 import { NumericAxis } from './scale/NumericAxis';
 import { TimeScale, SCALES, autoSelectScale } from './scale/TimeScale';
 import { HeaderRenderer } from './renderer/HeaderRenderer';
 import { TimelineRenderer } from './renderer/TimelineRenderer';
 import { BarRenderer } from './renderer/BarRenderer';
+import { TaskEdgeNavigation, type TaskBoundary } from './renderer/TaskEdgeNavigation';
 import { SideTableRenderer, type TableColumn } from './renderer/SideTableRenderer';
 import { LayoutEngine, ROW_HEIGHT } from './model/LayoutEngine';
 import type { SabidurianEntry, SabidurianGroup } from './model/SabidurianEntry';
@@ -33,6 +39,7 @@ import { ViewportCuller, type ViewportBounds } from './model/ViewportCuller';
 import { MeasureManager } from './interaction/MeasureManager';
 import { MarkerRenderer } from './renderer/MarkerRenderer';
 import { confirmAction } from './utils/confirmModal';
+import { getViewOptions } from './viewOptions';
 
 // Import all scale registrations
 import './scale/scales/index';
@@ -46,7 +53,7 @@ const CULLING_THRESHOLD = 150;
 const SYSTEM_PROP_PREFIXES = ['file.', 'formula.'];
 
 export class SabidurianView extends BasesView {
-  type = 'sabidurian';
+  type = 'sabidurian-timeline';
 
   private scrollEl: HTMLElement;
   private rootEl: HTMLElement | null = null;
@@ -56,6 +63,7 @@ export class SabidurianView extends BasesView {
   private headerRenderer: HeaderRenderer | null = null;
   private timelineRenderer: TimelineRenderer | null = null;
   private barRenderer: BarRenderer | null = null;
+  private taskEdges: TaskEdgeNavigation | null = null;
   private sideTableRenderer: SideTableRenderer | null = null;
   private dragManager: DragManager | null = null;
   private arrowRenderer: ArrowRenderer | null = null;
@@ -84,10 +92,16 @@ export class SabidurianView extends BasesView {
   private collapsedGroups: Set<string> = new Set();
 
   // ── Lock state (prevents drag/resize/create) ──
-  private _locked = false;
+  private _locked = true;
+  private lockUpdateState: string | null = null;
+  private timeZone = 'UTC';
+  private depPropName = 'blocked-by';
+  private scheduling = new Scheduling();
 
   /** Set to true after the first successful render so initial-scroll logic only fires once. */
   private _hasRendered = false;
+  private pendingViewport: { year: number; top: number } | null = null;
+  private restoreFrame: number | null = null;
 
   // ── Viewport culling (Phase 11) ──
   private viewportCuller: ViewportCuller | null = null;
@@ -103,21 +117,39 @@ export class SabidurianView extends BasesView {
   private _isGrouped = false;
   private _startPropName = 'start-date';
   private _endPropName = 'end-date';
+  private refreshColors = () => this.onDataUpdated();
 
   constructor(controller: QueryController, scrollEl: HTMLElement, plugin: SabidurianPlugin) {
     super(controller);
     this.scrollEl = scrollEl;
     this.plugin = plugin;
+    plugin.colorSubscribers?.add(this.refreshColors);
     // Show skeleton until first data arrives
     this.renderSkeleton();
   }
 
   onDataUpdated(): void {
+    // Saving a view option also notifies Bases. Keep a lock-only notification
+    // in place, but never swallow a coalesced data, grouping or display change.
+    if (this.lockUpdateState && !this.pendingViewport && this.rootEl?.isConnected && this.timelineRenderer) {
+      const next = this.captureLockUpdateState();
+      if (next === this.lockUpdateState) {
+        const locked = this.config.get('locked') as boolean | undefined;
+        this.applyLockState(locked ?? (this.plugin.settings.lockOnMobile && isTouchDevice()));
+        return;
+      }
+    }
+    this.lockUpdateState = null;
     // Preserve scroll position across re-renders
-    const prevScrollLeft = this.timelineRenderer?.element.scrollLeft ?? 0;
-    const prevScrollTop = this.timelineRenderer?.element.scrollTop ?? 0;
+    const previous = this.pendingViewport ?? (this.timelineRenderer ? {
+      year: this.axis.pixelToYear(this.timelineRenderer.element.scrollLeft),
+      top: this.timelineRenderer.element.scrollTop,
+    } : null);
+    this.pendingViewport = previous;
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
 
     // Clean up
+    this.taskEdges?.destroy(); this.taskEdges = null;
     this.dragManager?.destroy();
     this.dragManager = null;
     this.arrowDragManager?.destroy();
@@ -159,6 +191,10 @@ export class SabidurianView extends BasesView {
       return;
     }
 
+    this.timeZone = String(this.config.get('timeZone') || Intl.DateTimeFormat().resolvedOptions().timeZone);
+    try { this.scheduling = new Scheduling(Number(this.config.get('snapMinutes') || 5), this.timeZone); }
+    catch (error) { this.renderEmptyState(String(error)); return; }
+    this.layoutEngine.oneTaskPerRow = this.config.get('oneTaskPerRow') === true;
     // Read config
     const startPropId = this.config.getAsPropertyId('startDateProp');
     const endPropId = this.config.getAsPropertyId('endDateProp');
@@ -174,7 +210,8 @@ export class SabidurianView extends BasesView {
 
     // Dependency property: view config > plugin setting > default
     const depPropRaw = this.config.get('dependencyProp') as string | undefined;
-    const depPropName = depPropRaw?.trim() || this.plugin.settings.dependencyProperty || 'blocked-by';
+    const depPropName = (depPropRaw?.trim() || this.plugin.settings.dependencyProperty || 'blocked-by').replace(/^note\./, '');
+    this.depPropName = depPropName;
 
     // BCE toggle
     const enableBCE = this.config.get('enableBCE') as boolean ?? true;
@@ -216,6 +253,12 @@ export class SabidurianView extends BasesView {
       sabidurianEntries = this.parseEntries(entries, startPropId, endPropId, colorPropId, depPropName, enableBCE, earliestStartPropId, latestEndPropId);
     }
 
+    const order = this.config.get('groupOrder');
+    const manualOrder = Array.isArray(order) ? order.map(String) : [];
+    if (manualOrder[0]) sabidurianGroups.sort((a, b) => {
+      const rank = (name: string) => { const i = manualOrder.indexOf(name); return i < 0 ? manualOrder.length : i; };
+      return rank(a.name) - rank(b.name);
+    });
     this.currentEntries = sabidurianEntries;
     this.currentGroups = sabidurianGroups;
 
@@ -253,7 +296,7 @@ export class SabidurianView extends BasesView {
       : autoSelectScale(range, containerWidth);
 
     // Generate columns for the selected scale (needed before canvas width calc)
-    const columns = this.currentScale.getColumnBoundaries(viewStart, viewEnd);
+    const columns = this.currentScale.getColumnBoundaries(viewStart, viewEnd, Number(this.config.get('tickMinutes') || 15));
 
     // Canvas width: ensure each column gets at least ~Npx so switching
     // scales always produces a visible difference in bar sizing. Capped at
@@ -263,11 +306,11 @@ export class SabidurianView extends BasesView {
     const minColPx = this.currentScale.minColumnPx ?? 80;
     const densityWidth = Math.min(MAX_CANVAS_WIDTH, columns.length * minColPx);
     const canvasWidth = Math.max(containerWidth, densityWidth);
-    this.axis.setView(viewStart, viewEnd, canvasWidth);
+    this.axis.setView(this.currentScale.id === 'month' && columns.length ? columns[0].start : viewStart, this.currentScale.id === 'month' && columns.length ? columns[columns.length - 1].end : viewEnd, canvasWidth);
     // Lock state: per-view config OR auto-lock on mobile via plugin setting
-    const configLocked = this.config.get('locked') as boolean ?? false;
+    const configLocked = this.config.get('locked') as boolean | undefined;
     const autoLock = this.plugin.settings.lockOnMobile && isTouchDevice();
-    this._locked = configLocked || autoLock;
+    this._locked = configLocked ?? autoLock;
 
     // Controls
     this.renderControls(sabidurianEntries.length);
@@ -322,6 +365,7 @@ export class SabidurianView extends BasesView {
         this.plugin.app,
         savedTableWidth,
       );
+      this.sideTableRenderer.propertyColors = this.plugin.settings.propertyColors ?? {};
 
       if (isGrouped) {
         this.sideTableRenderer.renderGrouped(
@@ -375,6 +419,8 @@ export class SabidurianView extends BasesView {
       this.rootEl,
     );
     this.barRenderer.setAxis(this.axis);
+    this.barRenderer.propertyColors = this.plugin.settings.propertyColors ?? {};
+    this.barRenderer.inspect = entry => this.inspectTask(entry);
     this.barRenderer.setDatePropNames(this._startPropName, this._endPropName);
 
     // Configure bar property badges
@@ -420,6 +466,8 @@ export class SabidurianView extends BasesView {
 
     // Raise the today marker above bars, group headers, and arrows
     this.timelineRenderer.raiseTodayMarker();
+    this.taskEdges = new TaskEdgeNavigation(this.timelineRenderer.element, this.timelineRenderer.overlayHost,
+      this.allVisibleEntries, row => this.layoutEngine.getRowY(row), (entry, boundary) => this.jumpToTaskBoundary(entry, boundary));
 
     // ── Scroll sync ──
     const timelineBody = this.timelineRenderer.element;
@@ -427,6 +475,7 @@ export class SabidurianView extends BasesView {
     // Horizontal: sync header with timeline
     timelineBody.addEventListener('scroll', () => {
       this.headerRenderer?.setScrollLeft(timelineBody.scrollLeft);
+      this.groupHeaderRenderer?.setScrollLeft(timelineBody.scrollLeft);
       // Viewport culling: schedule re-render if scrolled far enough
       if (this.cullingActive) {
         this.debouncedViewportRender();
@@ -446,14 +495,17 @@ export class SabidurianView extends BasesView {
     }
 
     // Restore scroll position from before re-render
-    if (prevScrollLeft || prevScrollTop) {
-      requestAnimationFrame(() => {
-        timelineBody.scrollLeft = prevScrollLeft;
-        timelineBody.scrollTop = prevScrollTop;
-        this.headerRenderer?.setScrollLeft(prevScrollLeft);
+    if (previous) {
+      this.restoreFrame = requestAnimationFrame(() => {
+        if (this.timelineRenderer?.element !== timelineBody) return;
+        timelineBody.scrollLeft = this.axis.yearToPixel(previous.year);
+        timelineBody.scrollTop = previous.top;
+        this.headerRenderer?.setScrollLeft(timelineBody.scrollLeft);
+        this.groupHeaderRenderer?.setScrollLeft(timelineBody.scrollLeft);
         if (this.sideTableRenderer) {
-          this.sideTableRenderer.scrollBody.scrollTop = prevScrollTop;
+          this.sideTableRenderer.scrollBody.scrollTop = previous.top;
         }
+        this.pendingViewport = null; this.restoreFrame = null;
         // After restoring scroll, do a viewport render with correct bounds
         if (this.cullingActive) {
           this.renderVisibleBars();
@@ -461,7 +513,7 @@ export class SabidurianView extends BasesView {
       });
     } else if (!this._hasRendered) {
       // First render: apply the configured initial-scroll behavior.
-      requestAnimationFrame(() => this.applyInitialScroll());
+      this.restoreFrame = requestAnimationFrame(() => { this.applyInitialScroll(); this.restoreFrame = null; });
     }
     this._hasRendered = true;
   }
@@ -476,17 +528,25 @@ export class SabidurianView extends BasesView {
     const mode = (this.config.get('initialScroll') as string | undefined) ?? 'today';
     const body = this.timelineRenderer.element;
 
-    if (mode === 'start') {
+    const focus = parseSabidurianDate(this.config.get('focusDate'), this.timeZone);
+    if (focus && mode !== 'start') {
+      const focusYear = sabidurianDateToYear(focus);
+      body.scrollLeft = Math.max(0, this.axis.yearToPixel(focusYear));
+      if (!this.currentGroups.length) {
+        const first = this.currentEntries.filter(e => e.row >= 0 && e.endYear > focusYear).sort((a,b) => a.row - b.row)[0];
+        if (first) body.scrollTop = Math.max(0, this.layoutEngine.getRowY(first.row) - 12);
+      }
+    } else if (mode === 'start') {
       body.scrollLeft = 0;
     } else if (mode === 'end') {
-      body.scrollLeft = Math.max(0, body.scrollWidth - body.clientWidth);
+      body.scrollLeft = Math.max(0, this.axis.yearToPixel(Math.max(...this.currentEntries.map(e => e.endYear))) - body.clientWidth * 0.9);
     } else {
       // 'today'
       const now = new Date();
       const y = now.getFullYear();
       const start = new Date(y, 0, 1).getTime();
       const end = new Date(y + 1, 0, 1).getTime();
-      const todayFrac = y + (now.getTime() - start) / (end - start);
+      const todayFrac = wallMsToAxis(instantToWallMs(now.getTime(), this.timeZone));
       if (todayFrac < this.axis.viewStart || todayFrac > this.axis.viewEnd) {
         body.scrollLeft = 0;
       } else {
@@ -494,6 +554,7 @@ export class SabidurianView extends BasesView {
       }
     }
     this.headerRenderer?.setScrollLeft(body.scrollLeft);
+    this.groupHeaderRenderer?.setScrollLeft(body.scrollLeft);
     if (this.sideTableRenderer) {
       this.sideTableRenderer.scrollBody.scrollTop = body.scrollTop;
     }
@@ -579,6 +640,7 @@ export class SabidurianView extends BasesView {
         this.timelineRenderer.svgElement,
         this.rootEl,
         this.axis,
+        () => this.barRenderer?.hideTooltip(),
       );
       // Click interception: measure mode consumes clicks before BarRenderer
       this.timelineRenderer.svgElement.addEventListener('click', (e) => {
@@ -606,17 +668,23 @@ export class SabidurianView extends BasesView {
         this.timelineRenderer.svgElement,
         this.plugin.app,
       );
+      this.arrowRenderer.dependencyProperty = this.depPropName;
+      this.arrowRenderer.locked = this._locked;
+      this.arrowRenderer.removeEdge = async (from, to) => this.changeDependency(from, to, false);
       this.arrowRenderer.render(
         entriesToRender,
         (row) => this.layoutEngine.getRowY(row),
       );
 
-      // Arrow drag-to-connect only when unlocked
-      if (!this._locked) {
+      // Keep editing handlers attached; lock changes enable them in place.
+      if (!isTouchDevice()) {
         this.arrowDragManager = new ArrowDragManager(
           this.timelineRenderer.svgElement,
           this.plugin.app,
         );
+        this.arrowDragManager.dependencyProperty = this.depPropName;
+        this.arrowDragManager.setLocked(this._locked);
+        this.arrowDragManager.connect = async (from, to) => this.changeDependency(from, to, true);
         this.arrowDragManager.attach(
           this.arrowRenderer.handles,
           entriesToRender,
@@ -628,8 +696,8 @@ export class SabidurianView extends BasesView {
       }
     }
 
-    // ── Drag interactions (skipped when locked) ──
-    if (!this._locked) {
+    // ── Drag interactions (disabled in place when locked) ──
+    if (!isTouchDevice()) {
       this.dragManager = new DragManager(
         this.timelineRenderer.svgElement,
         this.timelineRenderer.element,
@@ -637,6 +705,9 @@ export class SabidurianView extends BasesView {
         this.axis,
         this.currentScale!,
       );
+      this.dragManager.scheduling = this.currentEntries.every(e => e.startYear >= 1) ? this.scheduling : null;
+      this.dragManager.setLocked(this._locked);
+      this.dragManager.persist = (entry, start, end) => this.saveSchedule(entry, start, end);
       this.dragManager.setDatePropNames(this._startPropName, this._endPropName);
       this.dragManager.attachToBarGroups(
         entriesToRender,
@@ -647,12 +718,7 @@ export class SabidurianView extends BasesView {
         setTimeout(() => this.onDataUpdated(), 200);
       });
       this.dragManager.setCreateCallback(async (startYear, endYear) => {
-        const startStr = this.yearToDateStr(startYear);
-        const endStr = this.yearToDateStr(endYear);
-        await this.createFileForView(undefined, (fm) => {
-          fm[this._startPropName] = startStr;
-          fm[this._endPropName] = endStr;
-        });
+        this.openNewTask(String(this.yearToDateStr(startYear)), String(this.yearToDateStr(endYear)));
       });
     }
 
@@ -667,18 +733,20 @@ export class SabidurianView extends BasesView {
       this.axis,
       this.currentScale!,
     );
+    this.contextMenuManager.inspect = entry => this.inspectTask(entry);
+    this.contextMenuManager.dependencyProperty = this.depPropName;
+    this.contextMenuManager.viewLocked = this._locked;
     this.contextMenuManager.lockedProperty = this.plugin.settings.lockedProperty || 'locked';
     this.contextMenuManager.attach(
       entriesToRender,
       (row) => this.layoutEngine.getRowY(row),
     );
     this.contextMenuManager.setCreateCallback(async (startYear, endYear) => {
-      const startStr = this.yearToDateStr(startYear);
-      const endStr = this.yearToDateStr(endYear);
-      await this.createFileForView(undefined, (fm) => {
-        fm[this._startPropName] = startStr;
-        fm[this._endPropName] = endStr;
-      });
+      if (this._locked) return;
+      if (startYear >= 1) {
+        const range = this.scheduling.edit('create', {start:startYear,end:startYear}, startYear);
+        this.openNewTask(String(this.yearToDateStr(range.start)), String(this.yearToDateStr(range.end)));
+      } else this.openNewTask(String(this.yearToDateStr(startYear)), String(this.yearToDateStr(endYear)));
     });
     this.contextMenuManager.setScrollToTodayCallback(() => {
       this.scrollToToday();
@@ -701,6 +769,7 @@ export class SabidurianView extends BasesView {
     // Keyboard nav always operates on ALL visible entries (not just viewport)
     // so arrow keys can navigate off-screen and trigger scroll.
     this.keyboardManager.attach(this.allVisibleEntries);
+    this.keyboardManager.setOpenEntryCallback(entry => this.inspectTask(entry));
     this.keyboardManager.setScrollToTodayCallback(() => {
       this.scrollToToday();
     });
@@ -709,6 +778,7 @@ export class SabidurianView extends BasesView {
       this.onDataUpdated();
     });
     this.keyboardManager.setDeleteEntryCallback(async (entry) => {
+      if (this._locked || entry.locked) return;
       const confirmed = await confirmAction(this.plugin.app, 'Delete entry', `Delete "${entry.label}"? This will move the file to trash.`);
       if (!confirmed) return;
       try {
@@ -729,80 +799,9 @@ export class SabidurianView extends BasesView {
       }
     });
 
-    // ── Touch interactions (mobile) ──
-    if (isTouchDevice()) {
-      this.touchManager = new TouchManager(
-        this.timelineRenderer.svgElement,
-        this.timelineRenderer.element,
-        this.plugin.app,
-        this.axis,
-        this.currentScale!,
-      );
-      this.touchManager.locked = this._locked;
-      this.touchManager.attach(entriesToRender, (row) => this.layoutEngine.getRowY(row));
-
-      this.touchManager.setSelectCallback((entry) => {
-        if (entry) {
-          const idx = entriesToRender.indexOf(entry);
-          if (idx >= 0) this.selectionManager?.select(idx);
-        } else {
-          this.selectionManager?.clear();
-        }
-      });
-
-      this.touchManager.setOpenCallback((entry) => {
-        this.plugin.app.workspace.getLeaf(false).openFile(entry.file);
-      });
-
-      this.touchManager.setContextMenuCallback((entry, x, y) => {
-        const fakeEvent = new MouseEvent('contextmenu', {
-          clientX: x, clientY: y, bubbles: true,
-        });
-        this.contextMenuManager?.showBarMenuForTouch(entry, fakeEvent);
-      });
-
-      this.touchManager.setEmptyContextMenuCallback((x, y) => {
-        const fakeEvent = new MouseEvent('contextmenu', {
-          clientX: x, clientY: y, bubbles: true,
-        });
-        this.contextMenuManager?.showEmptyMenuForTouch(fakeEvent);
-      });
-
-      // Drag & create callbacks only when unlocked
-      if (!this._locked) {
-        this.touchManager.setDragCompleteCallback(async (entry, newStart, newEnd) => {
-          const startDateStr = this.yearToDateStr(newStart, this.entryWritePrecision(entry, 'start'));
-          const endDateStr = this.yearToDateStr(newEnd, this.entryWritePrecision(entry, 'end'));
-          await this.plugin.app.fileManager.processFrontMatter(entry.file, (fm) => {
-            fm[this._startPropName] = startDateStr;
-            if (!entry.isPoint) {
-              fm[this._endPropName] = endDateStr;
-            }
-          });
-          setTimeout(() => this.onDataUpdated(), 200);
-        });
-
-        this.touchManager.setCreateCallback(async (startYear, endYear) => {
-          const startStr = this.yearToDateStr(startYear);
-          const endStr = this.yearToDateStr(endYear);
-          await this.createFileForView(undefined, (fm) => {
-            fm[this._startPropName] = startStr;
-            fm[this._endPropName] = endStr;
-          });
-        });
-      }
-
-      this.touchManager.setScaleChangeCallback((direction) => {
-        const currentIdx = SCALES.findIndex(s => s.id === this.currentScale?.id);
-        const newIdx = direction === 'in'
-          ? Math.max(0, currentIdx - 1)
-          : Math.min(SCALES.length - 1, currentIdx + 1);
-        if (newIdx !== currentIdx) {
-          this.config.set('scaleId', SCALES[newIdx].id);
-          this.debouncedRender();
-        }
-      });
-    }
+    // Native touch scroll and click-to-inspect. Editing happens in the same exact-time
+    // dialog on iOS and desktop; a long-press cannot begin an accidental schedule drag.
+    this.timelineRenderer.element.style.touchAction = 'pan-x pan-y';
 
     // Ensure today marker stays on top after bars are re-rendered
     this.timelineRenderer.raiseTodayMarker();
@@ -814,7 +813,7 @@ export class SabidurianView extends BasesView {
     const y = now.getFullYear();
     const start = new Date(y, 0, 1).getTime();
     const end = new Date(y + 1, 0, 1).getTime();
-    const todayFrac = y + (now.getTime() - start) / (end - start);
+    const todayFrac = wallMsToAxis(instantToWallMs(now.getTime(), this.timeZone));
     this.timelineRenderer?.scrollToYear(this.axis, todayFrac);
   }
 
@@ -878,11 +877,13 @@ export class SabidurianView extends BasesView {
     const result: SabidurianEntry[] = [];
 
     for (const entry of entries) {
-      const startVal = startPropId ? entry.getValue(startPropId) : null;
-      let startDate = parseSabidurianDate(startVal);
+      const fm = this.plugin.app.metadataCache.getFileCache(entry.file)?.frontmatter ?? {};
+      const readValue = (id: string | null | undefined): any => id ? (id.startsWith('note.') ? fm[id.slice(5)] : entry.getValue(id)) : null;
+      const startVal = readValue(startPropId);
+      let startDate = parseSabidurianDate(startVal, this.timeZone);
 
-      const endVal = endPropId ? entry.getValue(endPropId) : null;
-      let endDate = parseSabidurianDate(endVal);
+      const endVal = readValue(endPropId);
+      let endDate = parseSabidurianDate(endVal, this.timeZone);
 
       // Parse fuzzy/uncertainty dates early so we can fall back to them
       let earliestStart: SabidurianDate | undefined;
@@ -944,8 +945,7 @@ export class SabidurianView extends BasesView {
       // Detect ongoing events: has start but no end date
       let isOngoing = false;
       if (!endDate && startDate) {
-        const now = new Date();
-        const currentYear = now.getFullYear() + (now.getMonth() / 12) + (now.getDate() / 365);
+        const currentYear = wallMsToAxis(instantToWallMs(Date.now(), this.timeZone));
         isOngoing = true;
         endYear = currentYear;
       }
@@ -955,13 +955,13 @@ export class SabidurianView extends BasesView {
       // bars for events with an end date, so sub-day durations are visible.
       // Coarser scales fall back to the legacy ~8-hour threshold since sub-day
       // bars would be imperceptibly thin.
-      const pointThreshold = this.currentScale?.id === 'day' ? 0 : 0.001;
+      const pointThreshold = 0;
       const isPoint = !isOngoing && (!endDate || Math.abs(endYear - startYear) <= pointThreshold);
 
       // Color
       const colorVal = colorPropId ? entry.getValue(colorPropId) : null;
       const colorStr = colorVal ? colorVal.toString() : '';
-      const color = getColorForValue(colorStr);
+      const color = getColorForValue(colorStr, colorPropId ?? '', this.plugin.settings.propertyColors);
 
       // Gather extra properties for tooltip + table
       const properties: Record<string, string> = {};
@@ -976,7 +976,7 @@ export class SabidurianView extends BasesView {
       }
 
       // Parse dependencies (wikilinks from configured dependency property)
-      const depVal = depPropName ? entry.getValue(depPropName) : null;
+      const depVal = depPropName ? fm[depPropName] : null;
       const dependencies = this.resolveDependencies(depVal);
 
       // Clamp fuzzy dates relative to effective start/end
@@ -989,12 +989,23 @@ export class SabidurianView extends BasesView {
 
       // Per-note lock
       const lockedPropName = this.plugin.settings.lockedProperty || 'locked';
-      const lockedVal = entry.getValue(lockedPropName as any);
+      const lockedVal = fm[lockedPropName];
       const locked = lockedVal === true || lockedVal === 'true' || String(lockedVal) === 'true';
 
+      const labelId = this.config.getAsPropertyId('labelProp');
+      const labelValue = readValue(labelId);
+      const icon = resolveTaskIcon(fm.icon, this.plugin.app, file.path);
+      const label = iconLabel(labelValue == null || String(labelValue) === 'null' || String(labelValue) === '' ? file.basename : String(labelValue), icon);
+      const orderedProps = ['barDisplayProp1', 'barDisplayProp2', 'barDisplayProp3'].map(key => String(this.config.get(key) || '')).filter(Boolean);
+      for (const id of orderedProps) {
+        const value = readValue(id); properties[id.replace(/^note\./, '')] = value == null || String(value) === 'null' ? '' : String(value);
+      }
       result.push({
         file,
-        label: file.basename,
+        label,
+        icon,
+        dateValues: { [this._startPropName]: fm[this._startPropName], [this._endPropName]: fm[this._endPropName] },
+        displayLabel: fullLabel(label, properties, orderedProps.map(id => id.replace(/^note\./, ''))),
         start: effectiveStart,
         end: effectiveEnd,
         startYear,
@@ -1025,25 +1036,7 @@ export class SabidurianView extends BasesView {
    * Accepts: array of wikilinks like ["[[Task A]]"], single wikilink, or string.
    */
   private resolveDependencies(val: any): string[] {
-    if (!val) return [];
-
-    const items: string[] = Array.isArray(val) ? val.map(String) : [String(val)];
-    const paths: string[] = [];
-
-    for (const item of items) {
-      // Extract note name from wikilink: "[[Some Note]]" → "Some Note"
-      const match = item.match(/^\[\[(.+?)\]\]$/);
-      const noteName = match ? match[1] : item.trim();
-      if (!noteName) continue;
-
-      // Resolve via metadataCache
-      const file = this.plugin.app.metadataCache.getFirstLinkpathDest(noteName, '');
-      if (file) {
-        paths.push(file.path);
-      }
-    }
-
-    return paths;
+    return [...new Set(dependencyLinks(val).map(path => this.plugin.app.metadataCache.getFirstLinkpathDest(path, '')?.path).filter((path): path is string => !!path))];
   }
 
   /**
@@ -1138,6 +1131,99 @@ export class SabidurianView extends BasesView {
     };
   }
 
+  private taskFields(): TaskFields {
+    const label = String(this.config.get('labelProp') || 'note.Step');
+    return { start: this._startPropName, end: this._endPropName, dependencies: this.depPropName,
+      label: label.startsWith('note.') ? label.slice(5) : 'Step', zone: this.timeZone,
+      locked: this.plugin.settings.lockedProperty || 'locked',
+      folder: String(this.config.get('taskFolder') || '') };
+  }
+
+  private inspectTask(entry: SabidurianEntry): void {
+    // Preserve the original note-opening behavior for historical/fuzzy-only records.
+    if (entry.startYear < 1 || entry.fuzzyOnly || !entry.end) {
+      void this.plugin.app.workspace.getLeaf(false).openFile(entry.file); return;
+    }
+    new TaskInspector(this.plugin.app, entry.file, this.taskFields(), this.plugin.history, this._locked,
+      () => this.onDataUpdated(), () => this.setLocked(false), entry.label,
+      file => this.revealTask(file)).open();
+  }
+
+  private revealTask(file: TFile): void {
+    let entry = this.currentEntries.find(e => e.file.path === file.path);
+    if (!entry) { void this.plugin.app.workspace.getLeaf(false).openFile(file); return; }
+    if (entry.row < 0 && entry.groupKey) {
+      this.collapsedGroups.delete(entry.groupKey); this.config.set('collapsedGroups', [...this.collapsedGroups]); this.onDataUpdated();
+      entry = this.currentEntries.find(e => e.file.path === file.path) ?? entry;
+    }
+    this.pendingViewport = { year: entry.startYear, top: Math.max(0, this.layoutEngine.getRowY(entry.row) - 12) };
+    this.onDataUpdated(); this.inspectTask(entry);
+  }
+
+  private jumpToTaskBoundary(entry: SabidurianEntry, boundary: TaskBoundary): void {
+    if (!this.timelineRenderer) return;
+    const body = this.timelineRenderer.element;
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
+    this.restoreFrame = null; this.pendingViewport = null;
+    const inset = Math.min(48, body.clientWidth / 4);
+    const x = boundary === 'start' ? entry.x - inset : entry.x + entry.width - body.clientWidth + inset;
+    body.scrollLeft = Math.max(0, Math.min(x, Math.max(0, body.scrollWidth - body.clientWidth)));
+    this.headerRenderer?.setScrollLeft(body.scrollLeft); this.groupHeaderRenderer?.setScrollLeft(body.scrollLeft);
+    this.lastViewportBounds = null;
+    if (this.cullingActive) this.renderVisibleBars();
+    this.taskEdges?.refresh();
+    const bar = [...this.timelineRenderer.svgElement.querySelectorAll<SVGElement>('.sabidurian-bar-group')].find(el => el.dataset.filePath === entry.file.path);
+    (bar as unknown as HTMLElement | undefined)?.focus({ preventScroll: true });
+  }
+
+  private async saveSchedule(entry: SabidurianEntry, start: number, end: number): Promise<void> {
+    if (this._locked || entry.locked) return;
+    const values: Record<string, any> = {};
+    if (this.scheduling.changed(entry.startYear, start)) values[this._startPropName] = this.yearToDateStr(start, this.entryWritePrecision(entry, 'start'));
+    if (!entry.isPoint && !entry.isOngoing && this.scheduling.changed(entry.endYear, end)) values[this._endPropName] = this.yearToDateStr(end, this.entryWritePrecision(entry, 'end'));
+    try { await this.plugin.history.patch(entry.file, values, entry.dateValues); }
+    catch (error) { new Notice(String(error)); }
+  }
+
+  private async changeDependency(from: SabidurianEntry, to: SabidurianEntry, add: boolean): Promise<void> {
+    if (this._locked || to.locked || from.file.path === to.file.path) return;
+    const fm = this.plugin.app.metadataCache.getFileCache(to.file)?.frontmatter ?? {};
+    const deps = dependencyLinks(fm[this.depPropName]);
+    const matches = (path: string) => this.plugin.app.metadataCache.getFirstLinkpathDest(path, to.file.path)?.path === from.file.path;
+    const next = deps.filter(path => !matches(path));
+    if (add) next.push(from.file.path.replace(/\.md$/, ''));
+    await this.plugin.history.patch(to.file, { [this.depPropName]: next.map(path => `[[${path}]]`) }, { [this.depPropName]: fm[this.depPropName] });
+    this.onDataUpdated();
+  }
+
+  private async createTask(name: string, start: string, end: string, properties: Record<string, string> = {}): Promise<void> {
+    if (this._locked) return;
+    const fields = this.taskFields();
+    const folder = fields.folder || this.currentEntries[0]?.file.parent?.path || '';
+    const safeName = name.replace(/[\\/:*?"<>|]/g, '-');
+    const prefix = `${folder ? folder + '/' : ''}${safeName}`;
+    let path = `${prefix}.md`, suffix = 2;
+    while (this.plugin.app.vault.getAbstractFileByPath(path)) path = `${prefix} ${suffix++}.md`;
+    const fm = { ...properties, [fields.label]: name, [fields.start]: start, [fields.end]: end };
+    const content = '---\n' + Object.entries(fm).map(([k, v]) => `${JSON.stringify(k)}: ${JSON.stringify(v)}`).join('\n') + '\n---\n';
+    const file = await this.plugin.app.vault.create(path, content);
+    this.plugin.history.recordCreation(file, content, f => this.plugin.app.vault.read(f), f => this.plugin.app.vault.trash(f, true));
+    this.onDataUpdated();
+  }
+
+  private openNewTask(start: string, end?: string): void {
+    if (this._locked) return;
+    if (!/^\d{4}-\d{2}-\d{2}T/.test(start)) {
+      void this.createTask('New task', start, end ?? start).catch(e => new Notice(String(e))); return;
+    }
+    const files = this.plugin.app.vault.getMarkdownFiles();
+    const values = (key: string) => [...new Set(files.map(f => this.plugin.app.metadataCache.getFileCache(f)?.frontmatter?.[key]).filter(Boolean).map(String))];
+    const required = this.config.get('requiredNewTaskProps');
+    new NewTaskModal(this.plugin.app, this.timeZone, start, (name, begin, finish, properties) => this.createTask(name, begin, finish, properties), {
+      dishes: values('Dish'), chefs: values('Active Chef'), ovens: values('Oven Temp'), required: Array.isArray(required) ? required.map(String) : [], initialEnd: end,
+    }).open();
+  }
+
   private renderControls(entryCount: number): void {
     if (!this.rootEl) return;
 
@@ -1149,8 +1235,24 @@ export class SabidurianView extends BasesView {
       text: `${entryCount} entries`,
     });
 
+    controlsEl.createSpan({ text: this.timeZone, cls: 'sabidurian-zone' });
+    const find = controlsEl.createEl('button', { text: 'Find task…' });
+    find.onclick = () => new TaskPicker(this.plugin.app, this.currentEntries.map(e => e.file), this.taskFields(), file => this.revealTask(file)).open();
+    const undo = controlsEl.createEl('button', { text: 'Undo' });
+    undo.disabled = !this.plugin.history.canUndo;
+    undo.onclick = async () => { try { await this.plugin.history.undo(); this.onDataUpdated(); } catch (e) { new Notice(String(e)); } };
+    const create = controlsEl.createEl('button', { text: 'New task', cls: 'sabidurian-new-task-btn' }); create.disabled = this._locked;
+    create.onclick = () => {
+      const latest = Math.max(...this.currentEntries.map(e => e.startYear));
+      this.openNewTask(String(this.yearToDateStr(latest, 'minute')));
+    };
+    if (this.currentGroups.length) {
+      const expand = controlsEl.createEl('button', { text: 'Expand groups' });
+      expand.onclick = () => { this.config.set('collapsedGroups', []); this.onDataUpdated(); };
+    }
     // Scale selector
-    const scaleSelect = controlsEl.createEl('select', { cls: 'sabidurian-scale-select' });
+    const scaleControl = controlsEl.createSpan({ cls: 'sabidurian-scale-control' });
+    const scaleSelect = scaleControl.createEl('select', { cls: 'sabidurian-scale-select' });
     for (const scale of SCALES) {
       const opt = scaleSelect.createEl('option', { value: scale.id, text: scale.label });
       if (this.currentScale && scale.id === this.currentScale.id) {
@@ -1161,6 +1263,9 @@ export class SabidurianView extends BasesView {
       this.config.set('scaleId', scaleSelect.value);
       this.onDataUpdated();
     });
+    // Native selects otherwise size themselves to the longest (hidden) option.
+    scaleSelect.setAttribute('aria-label', 'Timeline scale');
+    scaleSelect.style.width = `calc(${this.currentScale?.label.length ?? 5}ch + 42px)`;
 
     // Today button
     const todayBtn = controlsEl.createEl('button', {
@@ -1199,12 +1304,9 @@ export class SabidurianView extends BasesView {
     });
     const lockIconSpan = lockBtn.createSpan({ cls: 'sabidurian-lock-icon' });
     setIcon(lockIconSpan, this._locked ? 'lock' : 'unlock');
-    lockBtn.createSpan({ text: this._locked ? 'Locked' : 'Lock' });
-    lockBtn.addEventListener('click', () => {
-      const currentLock = this.config.get('locked') as boolean ?? false;
-      this.config.set('locked', !currentLock);
-      this.onDataUpdated();
-    });
+    lockBtn.createSpan({ cls: 'sabidurian-lock-label', text: this._locked ? 'Locked' : 'Editing' });
+    lockBtn.setAttribute('aria-pressed', String(this._locked));
+    lockBtn.addEventListener('click', () => this.setLocked(!this._locked));
 
     // Measure button
     const measureBtn = controlsEl.createEl('button', {
@@ -1223,6 +1325,61 @@ export class SabidurianView extends BasesView {
         measureBtn.classList.add('sabidurian-measure-active');
       }
     });
+  }
+
+  private captureLockUpdateState(): string {
+    const entries = [...(this.data?.data ?? [])];
+    const keys = getViewOptions(this.config).flatMap(option => option.items ?? [option])
+      .map(option => option.key).filter(key => key && key !== 'locked');
+    keys.push('tableWidth', 'collapsedGroups', 'groupOrder', 'requiredNewTaskProps');
+    const propertyIds = [...new Set([...this.allProperties, ...this.config.getOrder(),
+      ...keys.map(key => this.config.get(key)).filter((value): value is BasesPropertyId =>
+        typeof value === 'string' && /^(note|formula|file)\./.test(value))])];
+    const depProperty = String(this.config.get('dependencyProp') || this.plugin.settings.dependencyProperty || 'blocked-by').replace(/^note\./, '');
+    return JSON.stringify({
+      options: keys.map(key => [key, this.config.get(key)]),
+      properties: this.allProperties.map(id => [id, this.config.getDisplayName(id)]),
+      order: this.config.getOrder(),
+      groups: (this.data?.groupedData ?? []).map(group => [String(group.key), group.hasKey(), group.entries.map(entry => entry.file.path)]),
+      // A saved .base file can rerun the query and replace entry objects even
+      // though every displayed value is unchanged. Compare their content.
+      rows: entries.map(entry => {
+        const fm = this.plugin.app.metadataCache.getFileCache(entry.file)?.frontmatter;
+        return [entry.file.path, entry.file.basename, fm, this.resolveDependencies(fm?.[depProperty]),
+          propertyIds.map(id => {
+            const value = entry.getValue(id);
+            const date = value instanceof Date ? value : (value as any)?.date;
+            return [id, value == null ? null : String(value), date instanceof Date ? date.getTime() : null];
+          })];
+      }),
+      settings: this.plugin.settings,
+      canUndo: this.plugin.history.canUndo,
+    });
+  }
+
+  private setLocked(locked: boolean): void {
+    this.applyLockState(locked);
+    this.lockUpdateState = this.captureLockUpdateState();
+    this.config.set('locked', locked);
+  }
+
+  private applyLockState(locked: boolean): void {
+    this._locked = locked;
+    this.dragManager?.setLocked(locked);
+    this.arrowDragManager?.setLocked(locked);
+    this.arrowRenderer?.setLocked(locked);
+    if (this.contextMenuManager) this.contextMenuManager.viewLocked = locked;
+    const button = this.rootEl?.querySelector<HTMLButtonElement>('.sabidurian-lock-btn');
+    if (button) {
+      button.classList.toggle('sabidurian-lock-active', locked);
+      button.setAttribute('aria-pressed', String(locked));
+      const icon = button.querySelector<HTMLElement>('.sabidurian-lock-icon');
+      if (icon) setIcon(icon, locked ? 'lock' : 'unlock');
+      const label = button.querySelector('.sabidurian-lock-label');
+      if (label) label.textContent = locked ? 'Locked' : 'Editing';
+    }
+    const create = this.rootEl?.querySelector<HTMLButtonElement>('.sabidurian-new-task-btn');
+    if (create) create.disabled = locked;
   }
 
   private renderSkeleton(): void {
@@ -1262,7 +1419,7 @@ export class SabidurianView extends BasesView {
     precision?: DatePrecision,
   ): string | number {
     const p = precision ?? this.currentScale?.writePrecision ?? 'day';
-    return yearToYAMLString(fractionalYear, p);
+    return yearToYAMLString(fractionalYear, p, this.timeZone);
   }
 
   /**
@@ -1281,6 +1438,10 @@ export class SabidurianView extends BasesView {
   }
 
   onunload(): void {
+    this.measureManager?.destroy(); this.measureManager = null;
+    this.taskEdges?.destroy(); this.taskEdges = null;
+    this.plugin.colorSubscribers?.delete(this.refreshColors);
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
     this.dragManager?.destroy();
     this.dragManager = null;
     this.arrowDragManager?.destroy();

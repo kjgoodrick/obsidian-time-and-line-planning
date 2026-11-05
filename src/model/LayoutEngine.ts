@@ -1,3 +1,4 @@
+import { labelWidth } from './labels';
 /**
  * LayoutEngine — Greedy interval scheduling for non-overlapping row assignment.
  * Entries are sorted by start time, then assigned to the lowest row
@@ -10,18 +11,19 @@ import type { SabidurianEntry, SabidurianGroup } from './SabidurianEntry';
 import { NumericAxis } from '../scale/NumericAxis';
 
 const BAR_HEIGHT = 28;
-const ROW_GAP = 4;
+const ROW_GAP = 16;
 const Y_OFFSET = 24;
 const POINT_HALF_WIDTH = 30; // Approx pixel space a point marker + label needs
 const LABEL_CHAR_WIDTH = 7; // Approx px per character for label text
 const LABEL_PADDING = 14; // Extra padding after label text
 const MIN_LABEL_WIDTH = 40; // Bar width threshold for inside vs outside label
-const GROUP_HEADER_HEIGHT = 32;
+const GROUP_HEADER_HEIGHT = 44;
 const GROUP_GAP = 12; // Gap between groups
 
 export const ROW_HEIGHT = BAR_HEIGHT + ROW_GAP;
 
 export class LayoutEngine {
+  oneTaskPerRow = false;
   /** Maps absolute row index → y pixel position. Used for grouped + ungrouped. */
   private rowYMap: Map<number, number> = new Map();
   private nextAbsoluteRow = 0;
@@ -106,7 +108,7 @@ export class LayoutEngine {
    */
   private assignRows(entries: SabidurianEntry[], axis: NumericAxis, baseRow: number): number {
     // Sort by start year, then by duration (longer first for better packing)
-    const sorted = [...entries].sort((a, b) => {
+    const sorted = this.oneTaskPerRow ? [...entries] : [...entries].sort((a, b) => {
       if (a.startYear !== b.startYear) return a.startYear - b.startYear;
       return (b.endYear - b.startYear) - (a.endYear - a.startYear);
     });
@@ -130,7 +132,7 @@ export class LayoutEngine {
         : entry.x;
 
       // Estimate label pixel width for outside-bar labels
-      const labelPx = entry.label.length * LABEL_CHAR_WIDTH + LABEL_PADDING;
+      const labelPx = labelWidth(entry.displayLabel ?? entry.label) + (entry.icon?.kind === 'image' ? 20 : 0);
       let barRight: number;
       if (entry.isPoint) {
         barRight = entry.x + POINT_HALF_WIDTH + labelPx;
@@ -138,17 +140,15 @@ export class LayoutEngine {
         const fuzzyRight = entry.latestEndYear != null
           ? axis.yearToPixel(entry.latestEndYear)
           : entry.x + entry.width;
-        // If bar is narrow, label renders outside to the right
-        const labelOverflow = entry.width < MIN_LABEL_WIDTH
-          ? entry.x + entry.width + 6 + labelPx
-          : 0;
+        // Labels always start inside the bar and continue past its right edge.
+        const labelOverflow = entry.x + 8 + labelPx;
         barRight = Math.max(fuzzyRight, labelOverflow) + 4;
       }
       const effectiveRight = barRight;
 
       // Find lowest available row
       let assignedRow = -1;
-      for (let r = 0; r < rowEnds.length; r++) {
+      for (let r = 0; !this.oneTaskPerRow && r < rowEnds.length; r++) {
         if (effectiveLeft >= rowEnds[r]) {
           assignedRow = r;
           break;

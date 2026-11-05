@@ -30,3 +30,13 @@ data.json
 # claude
 .claude/
 CLAUDE.md
+
+.venv/
+
+# Personal vaults and import material never belong in the public plugin repo
+.obsidian/
+Thanksgiving*/
+private-source/
+migration-audit/
+evidence/
+*.base

@@ -171,16 +171,16 @@ settings:
         type: variable-themed-color
         format: hex
         opacity: false
-        default-light: '#4ade80'
-        default-dark: '#4ade80'
+        default-light: '#64784e'
+        default-dark: '#91a37b'
     -
         id: sabidurian-arrow-conflict-color
         title: Arrow color (conflict)
         type: variable-themed-color
         format: hex
         opacity: false
-        default-light: '#f87171'
-        default-dark: '#f87171'
+        default-light: '#a35343'
+        default-dark: '#c3806f'
     -
         id: sabidurian-arrow-opacity
         title: Arrow opacity
@@ -444,7 +444,7 @@ settings:
 */
 
 /* Time & Line styles */
-/* All colors reference Obsidian CSS variables. Zero hard-coded colors. */
+/* Theme-aware colors with muted property palettes and Style Settings overrides. */
 
 /* ── Default values (Style Settings overrides these on body) ── */
 body {
@@ -458,8 +458,8 @@ body {
   --sabidurian-grid-minor-opacity: 0.5;
   --sabidurian-today-color: var(--interactive-accent);
   --sabidurian-today-width: 2px;
-  --sabidurian-arrow-ok-color: var(--text-success, #4ade80);
-  --sabidurian-arrow-conflict-color: var(--text-error, #f87171);
+  --sabidurian-arrow-ok-color: #64784e;
+  --sabidurian-arrow-conflict-color: #a35343;
   --sabidurian-arrow-opacity: 0.7;
   --sabidurian-arrow-hover-width: 3.5px;
   --sabidurian-select-color: var(--interactive-accent);
@@ -756,6 +756,14 @@ body.sabidurian-resizing {
 }
 
 /* ── Timeline body ── */
+.sabidurian-timeline-pane {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
 .sabidurian-timeline-body {
   flex: 1;
   overflow: auto;
@@ -918,6 +926,10 @@ body:not(.sabidurian-today-pulse) .sabidurian-today-line {
   cursor: crosshair;
 }
 
+.sabidurian-measure-mode .sabidurian-bar-group {
+  cursor: crosshair !important;
+}
+
 .sabidurian-measure-marker {
   stroke: var(--sabidurian-measure-marker-color);
   stroke-width: 1.5;
@@ -945,6 +957,18 @@ body:not(.sabidurian-today-pulse) .sabidurian-today-line {
   pointer-events: none;
   z-index: 20;
   line-height: 1.4;
+}
+
+.sabidurian-measure-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.sabidurian-measure-btn > .sabidurian-lock-icon {
+  display: inline-flex;
+  flex-shrink: 0;
 }
 
 .sabidurian-measure-btn.sabidurian-measure-active {
@@ -1266,6 +1290,8 @@ body.sabidurian-arrow-dragging * {
   fill: var(--text-muted);
   font-family: var(--font-interface);
   user-select: none;
+  /* This transform follows scrollLeft; easing it makes the arrow trail the name. */
+  transition: none;
 }
 
 .sabidurian-group-name {
@@ -1326,8 +1352,7 @@ body.sabidurian-arrow-dragging * {
   padding-left: 20px !important;
 }
 
-/* ── Group chevron rotation ── */
-.sabidurian-group-chevron,
+/* ── Side table chevron rotation ── */
 .sabidurian-st-group-chevron {
   transition: transform 0.2s ease;
 }
@@ -1403,6 +1428,7 @@ body.sabidurian-arrow-dragging * {
 
 /* ── Lock button ── */
 .sabidurian-lock-btn {
+  min-width: calc(7ch + 42px);
   font-size: 12px;
   display: inline-flex;
   align-items: center;
@@ -1476,9 +1502,9 @@ body.sabidurian-arrow-dragging * {
     padding: 2px 6px;
   }
 
-  /* Single-tier header: hide the top tier */
+  /* Keep hour context visible above the 15-minute tick labels. */
   .sabidurian-header-tier-top {
-    display: none !important;
+    display: block;
   }
   .sabidurian-header-tier-bottom {
     height: 28px;
@@ -1488,12 +1514,12 @@ body.sabidurian-arrow-dragging * {
     font-size: 10px;
   }
 
-  /* Truncate bar labels more aggressively */
+  /* Keep full task labels readable on narrow screens. */
   .sabidurian-bar-label {
-    font-size: 10px;
+    font-size: 12px;
   }
   .sabidurian-bar-label-outside {
-    font-size: 9px;
+    font-size: 12px;
   }
 
   /* Slightly larger touch targets for bars */
@@ -1501,17 +1527,6 @@ body.sabidurian-arrow-dragging * {
     /* Minimum hit area via transparent stroke */
     stroke: transparent;
     stroke-width: 6;
-  }
-
-  /* Tooltip: position at bottom of screen, full width */
-  .sabidurian-tooltip {
-    left: 8px !important;
-    right: 8px !important;
-    bottom: 8px !important;
-    top: auto !important;
-    max-width: none;
-    font-size: 13px;
-    border-radius: 8px;
   }
 
   /* Wider resize grips for touch */
@@ -1541,7 +1556,7 @@ body.sabidurian-arrow-dragging * {
   }
 
   .sabidurian-bar-label {
-    font-size: 9px;
+    font-size: 12px;
   }
 
   /* Hide arrows toggle on very small screens */
@@ -1596,3 +1611,138 @@ body.sabidurian-arrow-dragging * {
   rx: 6;
   ry: 6;
 }
+
+/* Local planning fork: touch-safe inspector and readable task labels. */
+.sabidurian-controls { flex-wrap: wrap; gap: 6px; }
+.sabidurian-header-context { min-height: 24px; padding: 3px 8px; font-size: 12px; font-weight: 600; color: var(--text-normal); }
+.sabidurian-controls button, .sabidurian-controls select { min-height: 36px; }
+.sabidurian-controls button, .sabidurian-controls select, .sabidurian-inspector button { padding: 6px 10px; margin: 0; line-height: 1.2; font-size: 13px; border-radius: 7px; }
+.sabidurian-zone { font-size: 11px; color: var(--text-muted); }
+.sabidurian-inspector { max-height: 80dvh; overflow-y: auto; padding-bottom: env(safe-area-inset-bottom); }
+.sabidurian-inspector label { display: block; margin: 12px 0; }
+.sabidurian-inspector input, .sabidurian-inspector select { display: block; box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; min-height: 44px; font-size: 16px; margin: 6px 0; }
+.sabidurian-inspector input::-webkit-date-and-time-value { min-width: 0; text-align: start; }
+.sabidurian-inspector input[type="datetime-local"] { appearance: none; -webkit-appearance: none; }
+.sabidurian-inspector h2, .sabidurian-inspector p { overflow-wrap: anywhere; }
+.sabidurian-inspector h2 { margin: 0 0 8px; font-size: 22px; }
+.sabidurian-inspector h3 { margin: 14px 0 6px; font-size: 16px; }
+.sabidurian-inspector p { margin: 6px 0; }
+.sabidurian-inspector .sabidurian-editor-zone { font-size: 12px; color: var(--text-muted); }
+.sabidurian-advanced-time { margin: 8px 0; font-size: 12px; color: var(--text-muted); }
+.sabidurian-advanced-time summary { cursor: pointer; min-height: 28px; padding: 5px 0; }
+.sabidurian-advanced-time button { margin-top: 6px; }
+.sabidurian-time-fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0 12px; }
+.sabidurian-time-fields label { min-width: 0; margin: 6px 0; }
+@media (min-width: 600px) { .sabidurian-time-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.sabidurian-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.sabidurian-editor-actions button, .sabidurian-inspector button { min-height: 44px; }
+.sabidurian-dependency-row { display: flex; gap: 8px; justify-content: space-between; align-items: center; margin: 8px 0; }
+.sabidurian-dependency-row span { overflow-wrap: anywhere; min-width: 0; }
+.sabidurian-inspector button { transition: background-color .12s ease, box-shadow .12s ease; cursor: pointer; }
+.sabidurian-inspector button:disabled { cursor: default; }
+.sabidurian-inspector button:not(.mod-cta):not(:disabled):hover { background-color: var(--background-modifier-hover); box-shadow: inset 0 0 0 1px var(--background-modifier-border); }
+.sabidurian-inspector button:focus-visible, .sabidurian-task-edge:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.sabidurian-inspector .sabidurian-dependency-link { min-width: 0; flex: 1; justify-content: flex-start; text-align: left; white-space: normal; overflow-wrap: anywhere; color: var(--text-accent, var(--interactive-accent)); background: transparent; box-shadow: none; border: 0; padding: 8px; }
+.sabidurian-dependency-row > button:not(.sabidurian-dependency-link) { flex-shrink: 0; }
+.modal:has(.sabidurian-inspector) > :is(.modal-close-button, .modal-header-button.mod-raised.clickable-icon:has(svg.lucide-x)) { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border-radius: 50%; cursor: pointer; transition: background-color .12s ease; }
+.modal:has(.sabidurian-inspector) > :is(.modal-close-button, .modal-header-button.mod-raised.clickable-icon:has(svg.lucide-x)):hover { background-color: var(--background-modifier-hover); }
+.modal:has(.sabidurian-inspector) > :is(.modal-close-button, .modal-header-button.mod-raised.clickable-icon:has(svg.lucide-x)):focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.sabidurian-task-edges { position: absolute; top: 0; left: 0; overflow: hidden; pointer-events: none; z-index: 4; }
+.sabidurian-task-edge { position: absolute; transform: translateY(-50%); display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; min-width: 0; min-height: 0; padding: 0; margin: 0; border-radius: 50%; border: 1px solid var(--background-modifier-border); color: var(--text-muted); background: var(--background-primary); box-shadow: 0 1px 4px #0002; pointer-events: auto; cursor: pointer; }
+.sabidurian-task-edge-start { left: 4px; }
+.sabidurian-task-edge-end { right: 4px; }
+.sabidurian-task-edge span { width: 7px; height: 7px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); margin-left: -3px; }
+.sabidurian-task-edge-start span { transform: rotate(135deg); margin-left: 3px; }
+.sabidurian-task-edge:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
+@media (pointer: coarse) { .sabidurian-task-edge { width: 44px; height: 44px; } }
+.sabidurian-editor-error { color: var(--text-error); }
+.sabidurian-bar-label-outside { fill: var(--text-normal); pointer-events: none; }
+.sabidurian-bar-group:focus { outline: none; }
+.sabidurian-bar-group:focus :is(.sabidurian-bar, .sabidurian-point-marker) { stroke: var(--interactive-accent); stroke-width: 3px; }
+@media (pointer: coarse) {
+  .sabidurian-controls button, .sabidurian-controls select { min-height: 44px; }
+  .sabidurian-arrow-handles-group { display: none; }
+  .sabidurian-tooltip { display: none !important; }
+  .sabidurian-measure-btn { display: none; }
+}
+@media (max-width: 600px) {
+  .sabidurian-table-toggle-btn { display: none; }
+  .sabidurian-controls { max-width: 100%; }
+}
+
+/* Keep the chart usable when an iPhone is turned sideways. */
+@media (pointer: coarse) and (orientation: landscape) and (max-height: 500px) {
+  .sabidurian-controls { flex-wrap: nowrap; overflow-x: auto; min-height: 56px; }
+  .sabidurian-controls > * { flex-shrink: 0; }
+  .sabidurian-controls-info, .sabidurian-controls .sabidurian-zone { display: none; }
+}
+
+
+/* Quiet earth tones. Named values keep table chips and timeline bars consistent. */
+body {
+  --sabidurian-tone-gray: #ddd9d2;
+  --sabidurian-tone-brown: #decbbc;
+  --sabidurian-tone-orange: #f0d2b5;
+  --sabidurian-tone-yellow: #e8dba6;
+  --sabidurian-tone-green: #ced9bf;
+  --sabidurian-tone-blue: #cad9dd;
+  --sabidurian-tone-purple: #dcd0e1;
+  --sabidurian-tone-pink: #e6cdd4;
+  --sabidurian-tone-red: #e8c8bc;
+  --sabidurian-label-ink: #302c28;
+}
+body.theme-dark {
+  --sabidurian-tone-gray: #494640;
+  --sabidurian-tone-brown: #584538;
+  --sabidurian-tone-orange: #624a32;
+  --sabidurian-tone-yellow: #5a5231;
+  --sabidurian-tone-green: #414e38;
+  --sabidurian-tone-blue: #374c53;
+  --sabidurian-tone-purple: #4f4159;
+  --sabidurian-tone-pink: #59414a;
+  --sabidurian-tone-red: #5f4037;
+  --sabidurian-label-ink: #f0e9df;
+  --sabidurian-arrow-ok-color: #91a37b;
+  --sabidurian-arrow-conflict-color: #c3806f;
+}
+.sabidurian-container .sabidurian-scale-select {
+  min-width: 0;
+  flex: 0 0 auto;
+  padding-inline: 10px 32px;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: none;
+}
+.sabidurian-scale-control { position: relative; display: inline-flex; flex: 0 0 auto; }
+.sabidurian-scale-control::after { content: ''; position: absolute; right: 14px; top: 50%; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: translateY(-70%) rotate(45deg); pointer-events: none; }
+.sabidurian-bar-label-flow {
+  fill: var(--sabidurian-label-ink);
+  font-size: var(--sabidurian-bar-label-size);
+  font-weight: 500;
+}
+.sabidurian-property-badge { pointer-events: none; }
+.sabidurian-property-badge rect { fill: var(--sabidurian-value-color); stroke: var(--background-primary); stroke-width: 0.75px; }
+.sabidurian-property-badge text { fill: var(--sabidurian-label-ink); font-family: var(--font-interface); font-size: var(--sabidurian-bar-label-size); font-weight: 500; }
+
+.sabidurian-task-icon { width: 1.2em; height: 1.2em; object-fit: contain; vertical-align: -0.2em; margin-inline-end: .3em; flex-shrink: 0; }
+.sabidurian-task-image { pointer-events: none; }
+[data-sabidurian-color="gray"] { --sabidurian-value-color: var(--sabidurian-tone-gray); }
+[data-sabidurian-color="brown"] { --sabidurian-value-color: var(--sabidurian-tone-brown); }
+[data-sabidurian-color="orange"] { --sabidurian-value-color: var(--sabidurian-tone-orange); }
+[data-sabidurian-color="yellow"] { --sabidurian-value-color: var(--sabidurian-tone-yellow); }
+[data-sabidurian-color="green"] { --sabidurian-value-color: var(--sabidurian-tone-green); }
+[data-sabidurian-color="blue"] { --sabidurian-value-color: var(--sabidurian-tone-blue); }
+[data-sabidurian-color="purple"] { --sabidurian-value-color: var(--sabidurian-tone-purple); }
+[data-sabidurian-color="pink"] { --sabidurian-value-color: var(--sabidurian-tone-pink); }
+[data-sabidurian-color="red"] { --sabidurian-value-color: var(--sabidurian-tone-red); }
+.bases-td[data-sabidurian-color] .metadata-input-longtext,
+.bases-td[data-sabidurian-color] .bases-metadata-value input:not([type="checkbox"]),
+.bases-td[data-sabidurian-color] .bases-metadata-value textarea,
+.bases-td [data-sabidurian-color],
+.sabidurian-st-cell [data-sabidurian-color] {
+  background: var(--sabidurian-value-color);
+  color: var(--sabidurian-label-ink);
+  border-radius: 4px;
+}
+.bases-td[data-sabidurian-color] .metadata-input-longtext { padding-inline: 6px; }
+.sabidurian-st-cell [data-sabidurian-color] { padding: 2px 6px; }

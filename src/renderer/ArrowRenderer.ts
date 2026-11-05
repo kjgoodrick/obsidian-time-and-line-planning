@@ -30,6 +30,9 @@ export interface DependencyEdge {
 }
 
 export class ArrowRenderer {
+  dependencyProperty = 'blocked-by';
+  locked = false;
+  removeEdge: ((from: SabidurianEntry, to: SabidurianEntry) => Promise<void>) | null = null;
   private app: App;
   private svg: SVGSVGElement;
   private arrowGroup: SVGGElement;
@@ -77,12 +80,14 @@ export class ArrowRenderer {
     // Build lookup: filePath → entry
     const byPath = new Map<string, SabidurianEntry>();
     for (const entry of entries) {
+      if (entry.row < 0) continue;
       byPath.set(entry.file.path, entry);
     }
 
     // Build edges from each entry's dependencies
     for (const entry of entries) {
-      for (const depPath of entry.dependencies) {
+      if (entry.row < 0) continue;
+      for (const depPath of new Set(entry.dependencies)) {
         const blocker = byPath.get(depPath);
         if (!blocker) continue; // Dependency target not in current view
         if (blocker === entry) continue; // Self-reference
@@ -95,6 +100,7 @@ export class ArrowRenderer {
     // Render
     this.renderEdges();
     this.renderHandles(entries);
+    this.setLocked(this.locked);
 
     return this.edges;
   }
@@ -240,24 +246,26 @@ export class ArrowRenderer {
   }
 
   private async removeDependency(edge: DependencyEdge): Promise<void> {
+    if (this.locked || edge.to.locked) return;
+    if (this.removeEdge) { await this.removeEdge(edge.from, edge.to); return; }
     const targetFile = edge.to.file;
     const blockerBasename = edge.from.file.basename;
 
     await this.app.fileManager.processFrontMatter(targetFile, (fm) => {
-      const deps: any[] = fm['blocked-by'] ?? [];
+      const deps: any[] = fm[this.dependencyProperty] ?? [];
       if (!Array.isArray(deps)) return;
 
       // Filter out the wikilink matching the blocker
-      fm['blocked-by'] = deps.filter((d: any) => {
+      fm[this.dependencyProperty] = deps.filter((d: any) => {
         const str = String(d);
         // Match "[[Name]]" or "Name"
         const cleaned = str.replace(/^\[\[/, '').replace(/\]\]$/, '');
-        return cleaned !== blockerBasename;
+        return this.app.metadataCache.getFirstLinkpathDest(cleaned.split('|')[0], targetFile.path)?.path !== edge.from.file.path;
       });
 
       // Clean up empty array
-      if (fm['blocked-by'].length === 0) {
-        delete fm['blocked-by'];
+      if (fm[this.dependencyProperty].length === 0) {
+        delete fm[this.dependencyProperty];
       }
     });
 
@@ -300,6 +308,12 @@ export class ArrowRenderer {
       handle.style.cursor = 'crosshair';
       this.handleGroup.appendChild(handle);
     }
+  }
+
+  /** Change editing affordances without replacing the dependency paths. */
+  setLocked(locked: boolean): void {
+    this.locked = locked;
+    this.handleGroup.style.display = locked ? 'none' : '';
   }
 
   /** Get the arrow handle elements for ArrowDragManager to attach events to. */

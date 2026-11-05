@@ -20,7 +20,7 @@ class DependencyPicker extends FuzzySuggestModal<SabidurianEntry> {
   private items: SabidurianEntry[];
   private onDone: () => void;
 
-  constructor(app: App, target: SabidurianEntry, items: SabidurianEntry[], onDone: () => void) {
+  constructor(app: App, target: SabidurianEntry, items: SabidurianEntry[], onDone: () => void, private dependencyProperty = 'blocked-by') {
     super(app);
     this.target = target;
     this.items = items;
@@ -37,17 +37,17 @@ class DependencyPicker extends FuzzySuggestModal<SabidurianEntry> {
   }
 
   async onChooseItem(blocker: SabidurianEntry): Promise<void> {
-    const wikilink = `[[${blocker.file.basename}]]`;
+    const wikilink = `[[${blocker.file.path.replace(/\.md$/, '')}]]`;
     await this.app.fileManager.processFrontMatter(this.target.file, (fm) => {
-      const existing = fm['blocked-by'];
+      const existing = fm[this.dependencyProperty];
       if (Array.isArray(existing)) {
         if (!existing.includes(wikilink)) {
           existing.push(wikilink);
         }
       } else if (existing) {
-        fm['blocked-by'] = [String(existing), wikilink];
+        fm[this.dependencyProperty] = [String(existing), wikilink];
       } else {
-        fm['blocked-by'] = [wikilink];
+        fm[this.dependencyProperty] = [wikilink];
       }
     });
     new Notice(`Added dependency: "${this.target.label}" blocked by "${blocker.label}"`);
@@ -61,6 +61,10 @@ type ChangeScaleCallback = (scaleId: string) => void;
 type RefreshCallback = () => void;
 
 export class ContextMenuManager {
+  private detachListeners: (() => void)[] = [];
+  dependencyProperty = 'blocked-by';
+  viewLocked = false;
+  inspect: ((entry: SabidurianEntry) => void) | null = null;
   private app: App;
   private svg: SVGSVGElement;
   private axis: NumericAxis;
@@ -100,7 +104,7 @@ export class ContextMenuManager {
     const groups = this.svg.querySelectorAll('.sabidurian-bar-group');
     groups.forEach((group, idx) => {
       if (idx >= entries.length) return;
-      group.addEventListener('contextmenu', (e) => {
+      this.listen(group, (e) => {
         e.preventDefault();
         e.stopPropagation();
         this.showBarMenu(entries[idx], e as MouseEvent);
@@ -108,7 +112,7 @@ export class ContextMenuManager {
     });
 
     // Empty area context menu
-    this.svg.addEventListener('contextmenu', (e) => {
+    this.listen(this.svg, (e) => {
       if ((e.target as Element).closest('.sabidurian-bar-group')) return;
       if ((e.target as Element).closest('.sabidurian-group-header')) return;
       if ((e.target as Element).closest('.sabidurian-arrow-group')) return;
@@ -164,6 +168,7 @@ export class ContextMenuManager {
     menu.addItem((item) =>
       item.setTitle('Duplicate')
         .setIcon('copy')
+        .setDisabled(this.viewLocked || entry.locked)
         .onClick(() => {
           this.duplicateEntry(entry);
         }),
@@ -173,6 +178,7 @@ export class ContextMenuManager {
     menu.addItem((item) =>
       item.setTitle('Delete')
         .setIcon('trash-2')
+        .setDisabled(this.viewLocked || entry.locked)
         .onClick(() => {
           this.deleteEntry(entry);
         }),
@@ -242,7 +248,7 @@ export class ContextMenuManager {
         .setIcon('plus')
         .onClick(() => {
           const svgRect = this.svg.getBoundingClientRect();
-          const localX = e.clientX - svgRect.left + this.svg.parentElement!.scrollLeft;
+          const localX = e.clientX - svgRect.left;
           const clickYear = this.axis.pixelToYear(localX);
           // Create a small default range around click point
           const unitDuration = this.scale.unitDurationYears;
@@ -283,6 +289,7 @@ export class ContextMenuManager {
   // ── Actions ──
 
   private async editDates(entry: SabidurianEntry): Promise<void> {
+    if (this.inspect) { this.inspect(entry); return; }
     // Read current dates and present a simple prompt-based editor
     const startStr = formatSabidurianDate(entry.start);
     const endStr = entry.end ? formatSabidurianDate(entry.end) : '';
@@ -297,6 +304,7 @@ export class ContextMenuManager {
   }
 
   private async duplicateEntry(entry: SabidurianEntry): Promise<void> {
+    if (this.viewLocked || entry.locked) return;
     try {
       const originalContent = await this.app.vault.read(entry.file);
       const folder = entry.file.parent?.path ?? '';
@@ -319,9 +327,10 @@ export class ContextMenuManager {
   }
 
   private async deleteEntry(entry: SabidurianEntry): Promise<void> {
+    if (this.viewLocked || entry.locked) return;
     // Confirm before deleting
     const confirmed = await confirmAction(this.app, 'Delete entry', `Delete "${entry.label}"? This will move the file to trash.`);
-    if (!confirmed) return;
+    if (!confirmed || this.viewLocked || entry.locked) return;
 
     try {
       await this.app.vault.trash(entry.file, true);
@@ -332,6 +341,8 @@ export class ContextMenuManager {
   }
 
   private addDependency(entry: SabidurianEntry): void {
+    if (this.inspect) { this.inspect(entry); return; }
+    if (this.viewLocked || entry.locked) return;
     const otherEntries = this.entries.filter(e => e.file.path !== entry.file.path);
     if (otherEntries.length === 0) {
       new Notice('No other entries to create a dependency with.');
@@ -340,12 +351,14 @@ export class ContextMenuManager {
 
     new DependencyPicker(this.app, entry, otherEntries, () => {
       this.onRefresh?.();
-    }).open();
+    }, this.dependencyProperty).open();
   }
 
   private async removeAllDependencies(entry: SabidurianEntry): Promise<void> {
+    if (this.inspect) { this.inspect(entry); return; }
+    if (this.viewLocked || entry.locked) return;
     await this.app.fileManager.processFrontMatter(entry.file, (fm) => {
-      delete fm['blocked-by'];
+      delete fm[this.dependencyProperty];
     });
     new Notice(`Removed all dependencies from "${entry.label}"`);
     this.onRefresh?.();
@@ -392,9 +405,15 @@ export class ContextMenuManager {
   }
 
   destroy(): void {
+    for (const detach of this.detachListeners.splice(0)) detach();
     this.onCreateEntry = null;
     this.onScrollToToday = null;
     this.onChangeScale = null;
     this.onRefresh = null;
+  }
+
+  private listen(target: Element, handler: (e: MouseEvent) => void): void {
+    target.addEventListener('contextmenu', handler as EventListener);
+    this.detachListeners.push(() => target.removeEventListener('contextmenu', handler as EventListener));
   }
 }

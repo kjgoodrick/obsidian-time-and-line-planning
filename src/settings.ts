@@ -7,6 +7,7 @@
  */
 
 import { App, Modal, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { COLOR_TONES, type PropertyColors } from './utils/colorUtils';
 
 export interface SabidurianMarker {
   label: string;
@@ -22,6 +23,8 @@ export interface SabidurianMarker {
 }
 
 export interface SabidurianSettings {
+  /** Value colors are presentation only; the underlying properties stay editable. */
+  propertyColors: PropertyColors;
   /** Day the week starts on: 0 = Sunday, 1 = Monday. */
   weekStart: number;
   /** Default frontmatter property name used for dependencies. */
@@ -41,6 +44,7 @@ export interface SabidurianSettings {
 }
 
 export const DEFAULT_SETTINGS: SabidurianSettings = {
+  propertyColors: {},
   weekStart: 1, // Monday
   dependencyProperty: 'blocked-by',
   maxEntries: 5000,
@@ -132,21 +136,33 @@ export class SabidurianSettingTab extends PluginSettingTab {
           });
       });
 
-    new Setting(containerEl)
-      .setName('Badge minimum bar width')
-      .setDesc('Only show property badges when the bar is at least this many pixels wide.')
-      .addText((text) => {
-        text
-          .setPlaceholder('80')
-          .setValue(String(this.plugin.settings.barPropertyMinWidth))
-          .onChange(async (value) => {
-            const num = parseInt(value, 10);
-            if (!isNaN(num) && num > 0) {
-              this.plugin.settings.barPropertyMinWidth = num;
-              await this.plugin.saveSettings();
-            }
-          });
-      });
+    containerEl.createEl('h3', { text: 'Property colors' });
+    containerEl.createEl('p', { text: 'Use the same muted color for a value in timeline bars, badges and editable Bases tables.' });
+    for (const [property, values] of Object.entries(this.plugin.settings.propertyColors)) {
+      for (const [value, tone] of Object.entries(values)) {
+        new Setting(containerEl).setName(value).setDesc(property)
+          .addDropdown(dropdown => {
+            for (const color of COLOR_TONES) dropdown.addOption(color, color[0].toUpperCase() + color.slice(1));
+            dropdown.setValue(tone).onChange(async color => {
+              values[value] = color as typeof tone; await this.plugin.saveSettings();
+            });
+          })
+          .addExtraButton(button => button.setIcon('x').setTooltip('Remove color').onClick(async () => {
+            delete values[value]; await this.plugin.saveSettings(); this.display();
+          }));
+      }
+    }
+    let newProperty = '', newValue = '';
+    new Setting(containerEl).setName('Add a value color')
+      .addText(text => text.setPlaceholder('Property, e.g. Dish').onChange(value => { newProperty = value.trim(); }))
+      .addText(text => text.setPlaceholder('Exact property value').onChange(value => { newValue = value.trim(); }))
+      .addButton(button => button.setButtonText('Add').onClick(async () => {
+        if (!newProperty || !newValue) return;
+        const colors = this.plugin.settings.propertyColors;
+        if (!Object.prototype.hasOwnProperty.call(colors, newProperty)) Object.defineProperty(colors, newProperty, { value: {}, enumerable: true, configurable: true, writable: true });
+        Object.defineProperty(colors[newProperty], newValue, { value: 'gray', enumerable: true, configurable: true, writable: true });
+        await this.plugin.saveSettings(); this.display();
+      }));
 
     new Setting(containerEl)
       .setName('Lock on mobile')
@@ -323,7 +339,7 @@ class MarkerModal extends Modal {
           this.close();
 
           // Refresh settings tab if it's open
-          const settingTab = this.plugin.app.setting?.activeTab;
+          const settingTab = (this.plugin.app as any).setting?.activeTab;
           if (settingTab instanceof SabidurianSettingTab) {
             settingTab.display();
           }

@@ -1,0 +1,16 @@
+import { build } from 'esbuild';
+import { spawnSync } from 'node:child_process';
+import { resolve } from 'node:path';
+await build({ entryPoints: ['tests/regression.ts'], outfile: 'dist/regression.cjs', bundle: true, platform: 'node', format: 'cjs', alias: { obsidian: resolve('tests/obsidian-mock.ts') } });
+await build({ entryPoints: ['tests/dom.ts'], outfile: 'dist/dom.mjs', bundle: true, platform: 'node', format: 'esm', external: ['happy-dom'], alias: { obsidian: resolve('tests/obsidian-mock.ts') } });
+await build({ entryPoints: ['tests/keyboard.ts'], outfile: 'dist/keyboard.mjs', bundle: true, platform: 'node', format: 'esm', external: ['happy-dom'], alias: { obsidian: resolve('tests/obsidian-mock.ts') } });
+await build({ entryPoints: ['tests/new-task.ts'], outfile: 'dist/new-task.mjs', bundle: true, platform: 'node', format: 'esm', external: ['happy-dom'], alias: { obsidian: resolve('tests/obsidian-mock.ts') } });
+await build({ entryPoints: ['tests/context-lock.ts'], outfile: 'dist/context-lock.mjs', bundle: true, platform: 'node', format: 'esm', external: ['happy-dom'], alias: { obsidian: resolve('tests/obsidian-mock.ts') } });
+await build({ entryPoints: ['tests/view-refresh.ts'], outfile: 'dist/view-refresh.mjs', bundle: true, platform: 'node', format: 'esm', external: ['happy-dom'], alias: { obsidian: resolve('tests/obsidian-mock.ts') } });
+await build({ entryPoints: ['tests/native-table-colors.ts'], outfile: 'dist/native-table-colors.mjs', bundle: true, platform: 'node', format: 'esm', external: ['happy-dom'] });
+await build({ entryPoints: ['tests/review-regressions.ts'], outfile: 'dist/review-regressions.mjs', bundle: true, platform: 'node', format: 'esm', external: ['happy-dom'], alias: { obsidian: resolve('tests/obsidian-mock.ts') } });
+await build({ entryPoints: ['tests/task-edge-navigation.ts'], outfile: 'dist/task-edge-navigation.mjs', bundle: true, platform: 'node', format: 'esm', external: ['happy-dom'], alias: { obsidian: resolve('tests/obsidian-mock.ts') } });
+await build({ entryPoints: ['tests/inspector-navigation.ts'], outfile: 'dist/inspector-navigation.mjs', bundle: true, platform: 'node', format: 'esm', external: ['happy-dom'], alias: { obsidian: resolve('tests/obsidian-mock.ts') } });
+await build({ entryPoints: ['tests/measure.ts'], outfile: 'dist/measure.mjs', bundle: true, platform: 'node', format: 'esm', external: ['happy-dom'], alias: { obsidian: resolve('tests/obsidian-mock.ts') } });
+const run = spawnSync(process.execPath, ['--test', 'dist/regression.cjs', 'dist/dom.mjs', 'dist/keyboard.mjs', 'dist/new-task.mjs', 'dist/context-lock.mjs', 'dist/view-refresh.mjs', 'dist/native-table-colors.mjs', 'dist/review-regressions.mjs', 'dist/task-edge-navigation.mjs', 'dist/inspector-navigation.mjs', 'dist/measure.mjs'], { stdio: 'inherit' });
+process.exit(run.status ?? 1);

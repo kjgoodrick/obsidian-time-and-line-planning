@@ -4,12 +4,17 @@
 
 import type { TFile } from 'obsidian';
 import type { SabidurianDate } from '../utils/dateUtils';
+import type { TaskIcon } from './taskIcons';
 
 export interface SabidurianEntry {
   /** Reference to the underlying Bases entry's file. */
   file: TFile;
   /** Display name for the bar. */
   label: string;
+  displayLabel?: string;
+  icon?: TaskIcon;
+  /** Raw mapped dates at render time, for conflict-safe pointer edits. */
+  dateValues?: Record<string, unknown>;
   /** Parsed start date. */
   start: SabidurianDate;
   /** Parsed end date, or null for point events. */

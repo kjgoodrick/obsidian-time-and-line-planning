@@ -100,11 +100,13 @@ export class SequenceView extends BasesView {
   private _orderEndPropName: string | null = null;
   /** In dense mode, maps dense index (0-based) → original order value. Null when sparse. */
   private _denseToSparse: number[] | null = null;
+  private refreshColors = () => this.onDataUpdated();
 
   constructor(controller: QueryController, scrollEl: HTMLElement, plugin: SabidurianPlugin) {
     super(controller);
     this.scrollEl = scrollEl;
     this.plugin = plugin;
+    plugin.colorSubscribers?.add(this.refreshColors);
     this.renderSkeleton();
   }
 
@@ -305,6 +307,7 @@ export class SequenceView extends BasesView {
       this.sideTableRenderer = new SideTableRenderer(
         contentEl, this.plugin.app, savedTableWidth,
       );
+      this.sideTableRenderer.propertyColors = this.plugin.settings.propertyColors ?? {};
 
       if (isGrouped) {
         this.sideTableRenderer.renderGrouped(
@@ -351,6 +354,7 @@ export class SequenceView extends BasesView {
     );
     this.barRenderer.sequenceMode = true;
     this.barRenderer.denseToSparse = this._denseToSparse;
+    this.barRenderer.propertyColors = this.plugin.settings.propertyColors ?? {};
 
     // Bar display props (F4)
     const barDisplayProps: string[] = [];
@@ -546,6 +550,7 @@ export class SequenceView extends BasesView {
       this.currentScale!,
     );
     this.contextMenuManager.lockedProperty = this.plugin.settings.lockedProperty || 'locked';
+    this.contextMenuManager.viewLocked = this._locked;
     this.contextMenuManager.attach(
       entriesToRender,
       (row) => this.layoutEngine.getRowY(row),
@@ -572,8 +577,9 @@ export class SequenceView extends BasesView {
     );
     this.keyboardManager.attach(this.allVisibleEntries);
     this.keyboardManager.setDeleteEntryCallback(async (entry) => {
+      if (this._locked || entry.locked) return;
       const confirmed = await confirmAction(this.plugin.app, 'Delete entry', `Delete "${entry.label}"? This will move the file to trash.`);
-      if (!confirmed) return;
+      if (!confirmed || this._locked || entry.locked) return;
       try {
         await this.plugin.app.vault.trash(entry.file, true);
         new Notice(`Deleted "${entry.label}"`);
@@ -682,7 +688,7 @@ export class SequenceView extends BasesView {
       // Color
       const colorVal = colorPropId ? entry.getValue(colorPropId) : null;
       const colorStr = colorVal ? colorVal.toString() : '';
-      const color = getColorForValue(colorStr);
+      const color = getColorForValue(colorStr, colorPropId ?? '', this.plugin.settings.propertyColors);
 
       // Properties
       const properties: Record<string, string> = {};
@@ -924,6 +930,7 @@ export class SequenceView extends BasesView {
   }
 
   onunload(): void {
+    this.plugin.colorSubscribers?.delete(this.refreshColors);
     this.destroyManagers();
     this.rootEl?.remove();
     this.rootEl = null;

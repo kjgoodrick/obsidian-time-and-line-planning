@@ -47,6 +47,9 @@ export class GroupHeaderRenderer {
     const g = document.createElementNS(SVG_NS, 'g');
     g.classList.add('sabidurian-group-header');
     g.dataset.groupName = group.name;
+    g.setAttribute('role', 'button'); g.setAttribute('tabindex', '0');
+    g.setAttribute('aria-label', `${group.name || 'Unassigned'} (${group.entries.length} tasks)`);
+    g.setAttribute('aria-expanded', String(!group.collapsed));
     if (group.collapsed) g.classList.add('sabidurian-group-collapsed');
 
     const y = group.headerY;
@@ -94,12 +97,18 @@ export class GroupHeaderRenderer {
       e.stopPropagation();
       this.onToggle?.(group.name);
     });
+    g.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.onToggle?.(group.name); }
+    });
 
     this.groupHeaderGroup.appendChild(g);
   }
 
   setToggleCallback(cb: (groupName: string) => void): void {
     this.onToggle = cb;
+  }
+  setScrollLeft(px: number): void {
+    this.groupHeaderGroup.querySelectorAll('text').forEach(el => el.setAttribute('transform', `translate(${px}, 0)`));
   }
 
   destroy(): void {

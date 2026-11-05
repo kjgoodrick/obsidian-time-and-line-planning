@@ -11,12 +11,14 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 
 export class TimelineRenderer {
   private wrapperEl: HTMLElement;
+  private paneEl: HTMLElement;
   private svg: SVGSVGElement;
   private gridGroup: SVGGElement;
   private todayGroup: SVGGElement;
 
   constructor(parentEl: HTMLElement) {
-    this.wrapperEl = parentEl.createDiv({ cls: 'sabidurian-timeline-body' });
+    this.paneEl = parentEl.createDiv({ cls: 'sabidurian-timeline-pane' });
+    this.wrapperEl = this.paneEl.createDiv({ cls: 'sabidurian-timeline-body' });
 
     this.svg = document.createElementNS(SVG_NS, 'svg');
     this.svg.classList.add('sabidurian-svg');
@@ -117,6 +119,8 @@ export class TimelineRenderer {
   get element(): HTMLElement {
     return this.wrapperEl;
   }
+
+  get overlayHost(): HTMLElement { return this.paneEl; }
 
   get svgElement(): SVGSVGElement {
     return this.svg;

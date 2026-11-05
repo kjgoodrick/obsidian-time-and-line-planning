@@ -17,6 +17,13 @@ export function getViewOptions(config: BasesViewConfig): any[] {
   }
 
   return [
+    { type: 'property', key: 'labelProp', displayName: 'Task label (property or formula)' },
+    { type: 'dropdown', key: 'snapMinutes', displayName: 'Edit snap (minutes)', default: '5', options: { '1': '1', '5': '5', '15': '15', '30': '30', '60': '60' } },
+    { type: 'dropdown', key: 'tickMinutes', displayName: 'Hourly visual ticks', default: '15', options: { '15': '15 minutes', '30': '30 minutes', '60': '1 hour' } },
+    { type: 'text', key: 'timeZone', displayName: 'Time zone (IANA)', placeholder: 'America/Denver' },
+    { type: 'text', key: 'taskFolder', displayName: 'Task folder', placeholder: 'Tasks' },
+    { type: 'toggle', key: 'oneTaskPerRow', displayName: 'One task per row', default: false },
+    { type: 'toggle', key: 'locked', displayName: 'Lock scheduling', default: true },
     // ── Property selectors ──
     {
       type: 'property',
@@ -97,6 +104,7 @@ export function getViewOptions(config: BasesViewConfig): any[] {
       },
     },
 
+    { type: 'text', key: 'focusDate', displayName: 'Open near datetime', placeholder: '2026-11-26T12:00' },
     // ── Focus filter ──
     {
       type: 'text',

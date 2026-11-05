@@ -11,14 +11,21 @@ export class HeaderRenderer {
   private headerEl: HTMLElement;
   private topTierEl: HTMLElement;
   private bottomTierEl: HTMLElement;
+  private contextEl: HTMLElement;
+  private columns: ColumnBoundary[] = [];
+  private axis: NumericAxis | null = null;
 
   constructor(parentEl: HTMLElement) {
+    this.contextEl = parentEl.createDiv({ cls: 'sabidurian-header-context' });
     this.headerEl = parentEl.createDiv({ cls: 'sabidurian-header-bar' });
     this.topTierEl = this.headerEl.createDiv({ cls: 'sabidurian-header-tier sabidurian-header-tier-top' });
     this.bottomTierEl = this.headerEl.createDiv({ cls: 'sabidurian-header-tier sabidurian-header-tier-bottom' });
   }
 
   render(columns: ColumnBoundary[], axis: NumericAxis): void {
+    this.columns = columns; this.axis = axis;
+    this.contextEl.style.display = columns.some(c => c.contextLabel) ? '' : 'none';
+    this.updateContext(0);
     this.topTierEl.empty();
     this.bottomTierEl.empty();
 
@@ -68,5 +75,11 @@ export class HeaderRenderer {
 
   setScrollLeft(px: number): void {
     this.headerEl.scrollLeft = px;
+    this.updateContext(px);
+  }
+  private updateContext(px: number): void {
+    if (!this.axis) return;
+    const value = this.axis.pixelToYear(px);
+    this.contextEl.setText(this.columns.find(c => c.start <= value && c.end > value)?.contextLabel ?? this.columns[0]?.contextLabel ?? '');
   }
 }

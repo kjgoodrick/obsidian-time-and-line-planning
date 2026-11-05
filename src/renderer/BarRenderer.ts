@@ -1,3 +1,5 @@
+import { fullLabel, labelWidth } from '../model/labels';
+import { prependTaskImage } from '../model/taskIcons';
 /**
  * BarRenderer — Renders individual bars and point markers as SVG elements.
  * Handles labels, hover tooltips, click-to-open, and Obsidian page preview.
@@ -6,8 +8,9 @@
 import type { App, TFile } from 'obsidian';
 import type { SabidurianEntry } from '../model/SabidurianEntry';
 import { BAR_HEIGHT } from '../model/LayoutEngine';
-import { formatSabidurianDate } from '../utils/dateUtils';
+import { formatSabidurianDate, formatDateRange } from '../utils/dateUtils';
 import type { NumericAxis } from '../scale/NumericAxis';
+import { getPropertyTone, type PropertyColors } from '../utils/colorUtils';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const POINT_RADIUS = 7;
@@ -23,7 +26,9 @@ export class BarRenderer {
 
   /** When true, tooltip shows ordinal position instead of dates. */
   sequenceMode = false;
+  inspect: ((entry: SabidurianEntry) => void) | null = null;
   denseToSparse: number[] | null = null;
+  propertyColors: PropertyColors = {};
 
   constructor(svg: SVGSVGElement, app: App, tooltipParent: HTMLElement) {
     this.app = app;
@@ -34,7 +39,7 @@ export class BarRenderer {
     svg.appendChild(this.barGroup);
 
     // Shared tooltip element
-    this.tooltipEl = tooltipParent.createDiv({ cls: 'sabidurian-tooltip' });
+    this.tooltipEl = svg.ownerDocument.body.createDiv({ cls: 'sabidurian-tooltip' });
     this.tooltipEl.style.display = 'none';
   }
 
@@ -191,67 +196,47 @@ export class BarRenderer {
       group.appendChild(gripRight);
     }
 
-    // Label: inside bar if wide enough, otherwise to the right
+    // Attach before measuring SVG text: detached text has no layout in WebKit.
+    this.barGroup.appendChild(group);
+    const displayLabel = entry.displayLabel ?? fullLabel(entry.label, entry.properties, this.badgesEnabled ? this.displayProps : []);
     const text = document.createElementNS(SVG_NS, 'text');
-    text.classList.add('sabidurian-bar-label');
+    text.classList.add('sabidurian-bar-label', 'sabidurian-bar-label-flow');
+    let labelX = entry.x + Math.min(LABEL_PADDING, entry.width / 2);
+    labelX += this.renderTaskImage(group, entry, labelX, y + BAR_HEIGHT / 2);
+    text.setAttribute('x', `${labelX}`);
     text.setAttribute('y', `${y + BAR_HEIGHT / 2 + 4}`);
-    text.textContent = entry.label;
-
-    if (entry.width >= MIN_LABEL_WIDTH) {
-      // Inside bar, clipped
-      text.setAttribute('x', `${entry.x + LABEL_PADDING}`);
-      text.classList.add('sabidurian-bar-label-inside');
-
-      // Clip path to bar bounds
-      const clipId = `clip-${entry.file.path.replace(/[^a-zA-Z0-9]/g, '-')}`;
-      const clipPath = document.createElementNS(SVG_NS, 'clipPath');
-      clipPath.id = clipId;
-      const clipRect = document.createElementNS(SVG_NS, 'rect');
-      clipRect.setAttribute('x', `${entry.x}`);
-      clipRect.setAttribute('y', `${y}`);
-      clipRect.setAttribute('width', `${entry.width}`);
-      clipRect.setAttribute('height', `${BAR_HEIGHT}`);
-      clipPath.appendChild(clipRect);
-      group.appendChild(clipPath);
-      text.setAttribute('clip-path', `url(#${clipId})`);
-    } else {
-      // To the right of bar
-      text.setAttribute('x', `${entry.x + entry.width + 6}`);
-      text.classList.add('sabidurian-bar-label-outside');
-    }
+    const props = this.badgesEnabled ? this.displayProps.filter(key => entry.properties[key] && entry.properties[key] !== 'null') : [];
+    // Older/sequence callers may provide a pre-composed label without property configuration.
+    text.textContent = props.length ? entry.label : (this.displayProps.length ? entry.label : displayLabel);
     group.appendChild(text);
-
-    // ── Inline property values (displayed right of label) ──
-    if (this.badgesEnabled && this.displayProps.length > 0 && entry.width >= this.badgeMinWidth) {
-      // Collect non-empty property values
-      const propParts: string[] = [];
-      for (const prop of this.displayProps) {
-        const value = entry.properties[prop];
-        if (value && value !== 'null') {
-          propParts.push(String(value).replace(/\[\[|\]\]/g, '').slice(0, 20));
-        }
-      }
-      if (propParts.length > 0) {
-        const inlineText = propParts.join(' · ');
-        // Estimate label width (approx 7px per char for the main label font)
-        const labelWidth = entry.label.length * 7 + LABEL_PADDING;
-        const propX = entry.x + labelWidth + 8;
-        const propY = y + BAR_HEIGHT / 2 + 4;
-
-        const propEl = document.createElementNS(SVG_NS, 'text');
-        propEl.setAttribute('x', `${propX}`);
-        propEl.setAttribute('y', `${propY}`);
-        propEl.textContent = inlineText;
-        propEl.classList.add('sabidurian-bar-prop-inline');
-
-        // Apply same clip-path as label so text doesn't overflow bar
-        if (entry.width >= MIN_LABEL_WIDTH) {
-          const clipId = `clip-${entry.file.path.replace(/[^a-zA-Z0-9]/g, '-')}`;
-          propEl.setAttribute('clip-path', `url(#${clipId})`);
-        }
-        group.appendChild(propEl);
-      }
+    const measure = (el: SVGTextElement) => el.getComputedTextLength?.() || Math.max(0, labelWidth(el.textContent ?? '') - 20);
+    let labelRight = labelX + measure(text);
+    for (const property of props) {
+      const value = entry.properties[property];
+      const badge = document.createElementNS(SVG_NS, 'g');
+      badge.classList.add('sabidurian-property-badge');
+      badge.dataset.property = property;
+      badge.dataset.sabidurianColor = getPropertyTone(property, value, this.propertyColors) ?? 'gray';
+      const bg = document.createElementNS(SVG_NS, 'rect');
+      bg.setAttribute('x', `${labelRight + 7}`);
+      bg.setAttribute('y', `${y + 4}`);
+      bg.setAttribute('height', `${BAR_HEIGHT - 8}`);
+      bg.setAttribute('rx', '4');
+      const valueText = document.createElementNS(SVG_NS, 'text');
+      valueText.setAttribute('x', `${labelRight + 13}`);
+      valueText.setAttribute('y', `${y + BAR_HEIGHT / 2 + 4}`);
+      valueText.textContent = value;
+      badge.append(bg, valueText); group.appendChild(badge);
+      const width = measure(valueText) + 12;
+      bg.setAttribute('width', `${width}`);
+      labelRight += 7 + width;
     }
+    // Larger selection area is separate from the real bar and its dates.
+    const hit = document.createElementNS(SVG_NS, 'rect');
+    hit.setAttribute('x', `${entry.x}`); hit.setAttribute('y', `${y - 6}`);
+    hit.setAttribute('width', `${Math.max(44, entry.width, labelRight - entry.x + 8)}`);
+    hit.setAttribute('height', '40'); hit.setAttribute('fill', 'transparent');
+    hit.classList.add('sabidurian-task-hit'); group.appendChild(hit);
 
     // ── Per-note lock indicator (Lucide-style SVG lock) ──
     if (entry.locked) {
@@ -356,7 +341,8 @@ export class BarRenderer {
 
     // Label to the right
     const text = document.createElementNS(SVG_NS, 'text');
-    text.setAttribute('x', `${cx + r + 6}`);
+    const labelX = cx + r + 6;
+    text.setAttribute('x', `${labelX + this.renderTaskImage(group, entry, labelX, cy)}`);
     text.setAttribute('y', `${cy + 4}`);
     text.classList.add('sabidurian-bar-label', 'sabidurian-bar-label-outside');
     text.textContent = entry.label;
@@ -366,10 +352,30 @@ export class BarRenderer {
     this.barGroup.appendChild(group);
   }
 
+  private renderTaskImage(group: SVGGElement, entry: SabidurianEntry, x: number, centerY: number): number {
+    if (entry.icon?.kind !== 'image') return 0;
+    const image = this.svg.ownerDocument.createElementNS(SVG_NS, 'image');
+    image.classList.add('sabidurian-task-image'); image.setAttribute('href', entry.icon.url);
+    image.setAttribute('x', String(x)); image.setAttribute('y', String(centerY - 8));
+    image.setAttribute('width', '16'); image.setAttribute('height', '16');
+    image.setAttribute('aria-hidden', 'true'); group.append(image);
+    return 20;
+  }
+
   private addInteractions(group: SVGGElement, entry: SabidurianEntry): void {
-    // Click to open note
+    group.setAttribute('role', 'button');
+    group.setAttribute('tabindex', '0');
+    group.setAttribute('aria-label', `${entry.displayLabel ?? entry.label}, ${formatSabidurianDate(entry.start)}`);
+    group.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault(); e.stopPropagation();
+        if (this.inspect) this.inspect(entry); else void this.app.workspace.getLeaf(false).openFile(entry.file);
+      }
+    });
+    // Click to inspect, with an explicit Open note action inside.
     group.addEventListener('click', (e) => {
       e.preventDefault();
+      if (this.inspect) { this.hideTooltip(); this.inspect(entry); return; }
       const leaf = this.app.workspace.getLeaf(false);
       leaf.openFile(entry.file);
     });
@@ -389,6 +395,7 @@ export class BarRenderer {
 
     // Trigger Obsidian page preview on hover
     group.addEventListener('mouseover', (e) => {
+      if (this.inspect) return;
       this.app.workspace.trigger('hover-link', {
         event: e,
         source: 'sabidurian-timeline',
@@ -415,12 +422,14 @@ export class BarRenderer {
   /** Build tooltip content using safe DOM methods (no innerHTML). */
   private showTooltip(entry: SabidurianEntry, e: MouseEvent): void {
     if (!this.tooltipEl) return;
+    if (this.svg.closest('.sabidurian-measure-mode')) { this.hideTooltip(); return; }
 
     // Clear previous content
     this.tooltipEl.empty();
 
     const strong = this.tooltipEl.createEl('strong');
-    strong.textContent = entry.label;
+    strong.textContent = entry.displayLabel ?? entry.label;
+    prependTaskImage(strong, entry.icon);
 
     if (this.sequenceMode) {
       const d2s = this.denseToSparse;
@@ -434,13 +443,9 @@ export class BarRenderer {
       );
     } else {
       this.tooltipEl.createEl('br');
-      let dateText = formatSabidurianDate(entry.start);
+      let dateText = formatDateRange(entry.start, entry.isPoint ? null : entry.end);
       if (entry.isOngoing) {
         dateText += ' → present (ongoing)';
-      } else if (entry.end && !entry.isPoint) {
-        dateText += ` → ${formatSabidurianDate(entry.end)}`;
-      } else if (entry.isPoint) {
-        dateText += ' (point event)';
       }
       this.tooltipEl.appendText(dateText);
     }
@@ -459,17 +464,6 @@ export class BarRenderer {
       this.tooltipEl.appendText(` ${formatSabidurianDate(entry.latestEnd)}`);
     }
 
-    // User-defined properties (safe: textContent only)
-    for (const [key, val] of Object.entries(entry.properties)) {
-      const keyLower = key.toLowerCase();
-      if (val && val !== 'null' && !BarRenderer.TOOLTIP_EXCLUDE_BASE.has(keyLower) && !this.tooltipExcludeExtra.has(keyLower)) {
-        this.tooltipEl.createEl('br');
-        const span = this.tooltipEl.createEl('span', { cls: 'sabidurian-tooltip-prop' });
-        span.textContent = `${key}:`;
-        this.tooltipEl.appendText(` ${val}`);
-      }
-    }
-
     this.tooltipEl.style.display = 'block';
     this.moveTooltip(e);
   }
@@ -481,8 +475,9 @@ export class BarRenderer {
     const gapY = 8;
     const tw = this.tooltipEl.offsetWidth || 200;
     const th = this.tooltipEl.offsetHeight || 60;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
+    const viewport = this.svg.ownerDocument.defaultView ?? window;
+    const vw = viewport.innerWidth;
+    const vh = viewport.innerHeight;
     const margin = 6;
 
     // Default: right of cursor, above cursor
@@ -495,12 +490,14 @@ export class BarRenderer {
     if (y < margin) y = e.clientY + gapY;
     // Clamp bottom
     if (y + th > vh - margin) y = vh - th - margin;
+    x = Math.max(margin, Math.min(x, vw - tw - margin));
+    y = Math.max(margin, y);
 
     this.tooltipEl.style.left = `${x}px`;
     this.tooltipEl.style.top = `${y}px`;
   }
 
-  private hideTooltip(): void {
+  hideTooltip(): void {
     if (!this.tooltipEl) return;
     this.tooltipEl.style.display = 'none';
   }

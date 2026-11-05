@@ -1,9 +1,9 @@
 {
   "id": "timeline-gantt-view",
-  "name": "Time & Line",
-  "version": "1.0.0-beta.1",
+  "name": "Time & Line (Planning)",
+  "version": "1.0.0-thanksgiving.11",
   "minAppVersion": "1.10.0",
-  "description": "A Set of Gantt Chart / Timeline Views for Obsidian Bases.",
+  "description": "Local planning fork of Time & Line with precise dates, full labels and touch-friendly editing.",
   "author": "Sabidurian",
   "authorUrl": "https://sabidurian.com",
   "isDesktopOnly": false

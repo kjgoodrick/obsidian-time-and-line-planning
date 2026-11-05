@@ -1,3 +1,4 @@
+import { Scheduling } from '../model/Scheduling';
 /**
  * TouchManager — Translates touch gestures into timeline interactions.
  *
@@ -66,6 +67,9 @@ type CreateCallback = (startYear: number, endYear: number) => void;
 type ScaleChangeCallback = (direction: 'in' | 'out') => void;
 
 export class TouchManager {
+  scheduling: Scheduling | null = null;
+  persist: ((entry: SabidurianEntry, start: number, end: number) => Promise<void>) | null = null;
+
   private app: App;
   private svg: SVGSVGElement;
   private wrapperEl: HTMLElement;
@@ -396,6 +400,13 @@ export class TouchManager {
       }
     }
 
+    if (this.scheduling) {
+      const target = this.ctx.dragType === 'move'
+        ? this.axis.pixelToYear(this.axis.yearToPixel(this.ctx.originalStartYear) + touch.clientX - this.ctx.startX)
+        : currentYear;
+      const result = this.scheduling.edit(this.ctx.dragType, { start: this.ctx.originalStartYear, end: this.ctx.originalEndYear }, target);
+      newStart = result.start; newEnd = result.end;
+    }
     // Update ghost
     if (this.ctx.ghostEl) {
       const x = this.axis.yearToPixel(newStart);
@@ -419,8 +430,8 @@ export class TouchManager {
 
     if (newStart != null && newEnd != null) {
       if (
-        Math.abs(newStart - this.ctx.originalStartYear) > 0.0001 ||
-        Math.abs(newEnd - this.ctx.originalEndYear) > 0.0001
+        Math.abs(newStart - this.ctx.originalStartYear) > 1e-11 ||
+        Math.abs(newEnd - this.ctx.originalEndYear) > 1e-11
       ) {
         this.onDragComplete?.(entry, newStart, newEnd);
       }
@@ -446,8 +457,9 @@ export class TouchManager {
     const localX = touch.clientX - svgRect.left;
     const currentYear = this.axis.pixelToYear(localX);
     const snapped = this.scale.snapToUnit(currentYear);
-    const start = Math.min(this.ctx.originalStartYear, snapped);
-    const end = Math.max(this.ctx.originalStartYear, snapped);
+    const created = this.scheduling?.edit('create', { start: this.ctx.originalStartYear, end: this.ctx.originalEndYear }, currentYear);
+    const start = created?.start ?? Math.min(this.ctx.originalStartYear, snapped);
+    const end = created?.end ?? Math.max(this.ctx.originalStartYear, snapped);
 
     if (this.ctx.ghostEl) {
       const x = this.axis.yearToPixel(start);
@@ -466,7 +478,7 @@ export class TouchManager {
     const newStart = (this.ctx as any)._newStart as number | undefined;
     const newEnd = (this.ctx as any)._newEnd as number | undefined;
 
-    if (newStart != null && newEnd != null && Math.abs(newEnd - newStart) > MIN_BAR_YEARS) {
+    if (newStart != null && newEnd != null && (this.scheduling || Math.abs(newEnd - newStart) > MIN_BAR_YEARS)) {
       this.onCreate?.(newStart, newEnd);
     }
 
@@ -499,7 +511,7 @@ export class TouchManager {
   // ── Helpers ──
 
   private getDragType(entry: SabidurianEntry, svgLocalX: number): 'move' | 'resize-start' | 'resize-end' {
-    if (entry.isPoint) return 'move';
+    if (entry.isPoint || entry.width < EDGE_THRESHOLD * 3) return 'move';
     const barLocalX = svgLocalX - entry.x;
     if (barLocalX < EDGE_THRESHOLD) return 'resize-start';
     if (barLocalX > entry.width - EDGE_THRESHOLD) return 'resize-end';

@@ -1,18 +1,23 @@
 # Collaboration bridge preview
 
 The planning fork exposes a versioned local integration bridge for
-`sabidurian-timeline` and `sabidurian-sequence`. This first increment provides
-record/property-badge targeting, selection, visible geometry, navigation and
-lifecycle notifications. It does **not** yet provide a complete comment feature.
-The Team Relay consumer, annotations, explicit touch annotation mode, typed lane
-targets, ranges, shared calendar markers and presence integration remain.
+`sabidurian-timeline` and `sabidurian-sequence`. It provides record/property-badge
+targeting, selection, visible geometry, guarded navigation, explicit annotation
+selection and lifecycle notifications. Team Relay's development consumer connects
+these to its saved-view comment controls. It does **not** yet provide the complete
+timeline comment feature: typed lanes, ranges, shared calendar markers, presence
+and native desktop/mobile acceptance remain.
 
 ## Discovery and lifetime
 
 Listen for the workspace event `time-and-line:collaboration-ready`. A consumer
 loaded later can trigger `time-and-line:collaboration-request`, passing a function
 that receives the same bridge. Check `protocolVersion === 1` before using it.
-The bridge is also exposed as the plugin's `collaboration` property.
+The bridge is also exposed as the plugin's `collaboration` property. Check
+`available === true` and the advertised `viewTypes`; disposal makes `available`
+false. These fields and the annotation capability are additive version-one
+requirements of the current Team Relay consumer; the initial bridge without them
+is not sufficient for contextual timeline comments.
 
 `getSurfaces()` returns currently connected view surfaces. `onChange(listener)`
 returns an unsubscribe function and announces registration, render/selection
@@ -28,8 +33,8 @@ hold at the point of use. Closing either the view or bridge invalidates handles.
 
 ## Targets and geometry
 
-The advertised capabilities are `item`, `cell`, `selection`, `geometry`, and
-`reveal`. Only registered renderer objects supply handles; text labels, SVG row
+The advertised capabilities are `item`, `cell`, `selection`, `geometry`,
+`reveal`, and `annotation`. Only registered renderer objects supply handles; text labels, SVG row
 order, CSS selectors and file-path attributes are not used as durable identities.
 
 | Target | Local identity |
@@ -65,17 +70,41 @@ an explicit unavailable/hidden location; it does not change saved filters or
 collapse settings. Empty query results cannot navigate a detached old renderer.
 
 An open task inspector with unsaved or invalid input causes `busy` before any
-scroll. The draft stays untouched; the consumer should stop Follow and let the
-user save or discard it explicitly. Closing an inspector releases this guard.
+scroll. `bridge.canNavigate(document)` exposes the same check before the consumer
+opens another file or activates a saved view. Recheck after asynchronous work and
+before each later navigation step. The draft stays untouched; the consumer should
+stop Follow and let the user save or discard it explicitly. Closing an inspector
+releases this guard. A disposed bridge returns false from this method.
+
+## Explicit annotation selection
+
+`surface.beginAnnotation(select, stopped)` enters one-shot target selection and
+returns an idempotent cleanup function, or undefined when unavailable or blocked
+by inspector changes. The consumer must expose an explicit entry/cancel control.
+Capture listeners prevent task editing, mouse compatibility gestures, context
+menus and scheduling keys. A click/tap resolves the exact current handle, removes
+the listeners, calls `stopped`, then synchronously calls `select(handle)`. It does
+not send a comment or mutate a task. Consumers still check current permissions
+and saved-view/record identity before acting.
+
+Touch start is not default-prevented, retaining native panning. Pointer movement
+beyond eight pixels and pointer cancellation suppress the following click.
+Tab remains available; Escape, window blur, document hiding, surface unload and
+explicit cleanup exit the mode. Re-entering stops the previous mode. The consumer
+must also cancel on permission loss, rebinding or its own unload. Physical touch,
+keyboard accessibility and native host acceptance remain release gates.
 
 ## Verification and remaining work
 
-`npm run package` passes 85 synthetic regressions, TypeScript checking, production
-build and deterministic plugin-only packaging. The 13 bridge cases use the real
+`npm run package` passes 93 synthetic regressions, TypeScript checking, production
+build and deterministic plugin-only packaging. The 21 bridge cases use the real
 Timeline/Sequence views and renderers with the existing Happy DOM host adapter.
 They cover item/badge identity, aliases, re-render/rename, coordinate hit testing,
 viewport clipping, selection preservation, collapsed groups, dirty inspector
-navigation, empty results, ambiguous properties and disposal.
+navigation, empty results, ambiguous properties, explicit annotation, touch-drag
+suppression, blur/visibility cleanup and disposal. Team Relay also has a source
+interoperability script that bundles both plugins' real view/bridge/client/adapter
+code against a synthetic Obsidian host, covering both view types and load orders.
 
 These tests do not establish native Obsidian desktop/mobile acceptance, rendered
 touch targets or battery behavior. No test vault or production plugin has been

@@ -837,7 +837,7 @@ var TimelineSurface = class {
   constructor(port) {
     this.port = port;
     this.protocolVersion = 1;
-    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal"]);
+    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal", "annotation"]);
     this.listeners = /* @__PURE__ */ new Set();
     this.closed = false;
     this.serial = 0;
@@ -887,6 +887,75 @@ var TimelineSurface = class {
   reveal(target) {
     return this.viewport() && ((target == null ? void 0 : target.type) === "item" || (target == null ? void 0 : target.type) === "cell") ? this.port.reveal(target) : "unavailable";
   }
+  /** Explicit one-shot selection mode. Touch keeps native pan/zoom; schedule
+   * handlers never receive the gesture, compatibility mouse event or key. */
+  beginAnnotation(select, stopped) {
+    var _a;
+    if (!this.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return;
+    (_a = this.stopAnnotation) == null ? void 0 : _a.call(this);
+    const cleanup = [];
+    let live = true, start, dragged = false;
+    const listen = (target, type, handler) => {
+      target.addEventListener(type, handler, true);
+      cleanup.push(() => target.removeEventListener(type, handler, true));
+    };
+    const stop = () => {
+      if (!live) return;
+      live = false;
+      for (const dispose of cleanup) dispose();
+      if (this.stopAnnotation === stop) this.stopAnnotation = void 0;
+      try {
+        stopped();
+      } catch (e) {
+      }
+    };
+    this.stopAnnotation = stop;
+    listen(this.root, "pointerdown", (event) => {
+      const pointer = event;
+      start = { clientX: pointer.clientX, clientY: pointer.clientY };
+      dragged = false;
+      event.stopImmediatePropagation();
+    });
+    listen(this.root, "pointermove", (event) => {
+      const pointer = event;
+      if (start && Math.hypot(pointer.clientX - start.clientX, pointer.clientY - start.clientY) > 8) dragged = true;
+    });
+    listen(this.root, "pointercancel", () => {
+      dragged = true;
+    });
+    listen(this.root, "touchstart", (event) => {
+      event.stopImmediatePropagation();
+    });
+    for (const type of ["mousedown", "contextmenu"]) listen(this.root, type, (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    });
+    listen(this.root, "click", (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const pointer = event;
+      if (dragged || !this.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return;
+      const handle = event.target && this.hit(event.target, pointer);
+      if (!(handle == null ? void 0 : handle.current())) return;
+      stop();
+      select(handle);
+    });
+    listen(this.root, "keydown", (event) => {
+      if (event.key === "Tab") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.key === "Escape") stop();
+    });
+    listen(this.root.ownerDocument, "keydown", (event) => {
+      if (event.key === "Escape") stop();
+    });
+    listen(this.root.ownerDocument, "visibilitychange", () => {
+      if (this.root.ownerDocument.hidden) stop();
+    });
+    const window2 = this.root.ownerDocument.defaultView;
+    if (window2) listen(window2, "blur", () => stop());
+    return stop;
+  }
   onChange(listener) {
     if (this.closed) return () => {
     };
@@ -906,7 +975,9 @@ var TimelineSurface = class {
     }
   }
   dispose() {
+    var _a;
     if (this.closed) return;
+    (_a = this.stopAnnotation) == null ? void 0 : _a.call(this);
     this.closed = true;
     this.serial++;
     for (const listener of [...this.listeners]) {
@@ -921,9 +992,16 @@ var TimelineSurface = class {
 var CollaborationBridge = class {
   constructor() {
     this.protocolVersion = 1;
+    this.viewTypes = Object.freeze(["sabidurian-timeline", "sabidurian-sequence"]);
     this.surfaces = /* @__PURE__ */ new Set();
     this.listeners = /* @__PURE__ */ new Set();
     this.closed = false;
+  }
+  get available() {
+    return !this.closed;
+  }
+  canNavigate(document2) {
+    return !this.closed && !TaskInspector.hasDirty(document2);
   }
   getSurfaces() {
     return this.closed ? [] : [...this.surfaces].filter((surface) => surface.current());

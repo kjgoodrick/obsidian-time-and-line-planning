@@ -22,7 +22,7 @@ The plugin ID is unchanged from upstream. The initial published version is `1.0.
 - `src/model/taskIcons.ts`: emoji and vault-local image icons.
 - `src/interaction/MeasureManager.ts`, `src/utils/measureDuration.ts`: drag measurement and compact durations.
 - `tests/`: automated regression tests; `tests/webkit/` is the standalone iOS Safari harness.
-- `src/collaboration/CollaborationBridge.ts`: optional local targeting/navigation bridge; see [COLLABORATION.md](COLLABORATION.md) for its version, permissions boundary and unfinished integrations.
+- `src/collaboration/CollaborationBridge.ts`: optional local targeting/navigation bridge with explicit annotation selection and pre-navigation dirty-inspector checks; see [COLLABORATION.md](COLLABORATION.md) for its version, permissions boundary and unfinished integrations.
 
 Preserve exact stored times, user edits, and viewport position across lock toggles. Dependencies never automatically shift dates. Touch panning must not move tasks. Keep native table fields editable. Honor locks in every editing path.
 

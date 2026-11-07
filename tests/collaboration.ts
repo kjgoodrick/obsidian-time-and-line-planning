@@ -108,10 +108,13 @@ for (const kind of ['timeline', 'sequence'] as const) {
       { start: 'start', end: 'end', label: 'title', dependencies: 'blocked-by', zone: 'UTC' }, f.plugin.history as any, false, () => {}, () => {});
     modal.open(); const input = modal.contentEl.querySelector('input')!; input.value = '2026-11-26T08:05:00'; const dirtyValue = input.value;
     assert.equal(TaskInspector.hasDirty(document), true);
+    assert.equal(f.bridge.canNavigate(document), false);
+    assert.equal(f.surface.beginAnnotation(() => assert.fail('dirty inspector selection'), () => {}), undefined);
     const body = f.surface.viewport()!, before = [body.scrollLeft, body.scrollTop];
     assert.equal(f.surface.reveal({ type: 'item', file: f.files[1] }), 'busy');
     assert.deepEqual([body.scrollLeft, body.scrollTop], before); assert.equal(input.value, dirtyValue);
     modal.close(); assert.equal(TaskInspector.hasDirty(document), false);
+    assert.equal(f.bridge.canNavigate(document), true);
     assert.equal(f.surface.reveal({ type: 'item', file: f.files[1] }), 'revealed'); assert.deepEqual(f.writes, []);
   });
 
@@ -120,6 +123,63 @@ for (const kind of ['timeline', 'sequence'] as const) {
     f.view.data = { data: [], groupedData: [] }; f.view.onDataUpdated();
     assert.equal(captured.current(), false); assert.deepEqual(f.surface.handles(), []);
     assert.equal(f.surface.viewport(), undefined); assert.equal(f.surface.reveal({ type: 'item', file: f.files[0] }), 'unavailable');
+  });
+
+  test(`${kind}: explicit annotation mode captures a badge without invoking schedule handlers`, () => {
+	const f = fixture(kind), received: TimelineHandle[] = []; let stopped = 0, scheduleGestures = 0;
+	const item = f.surface.handles().find((handle: TimelineHandle) => handle.target.type === 'item' && handle.target.file === f.files[0])!;
+	const badge = f.surface.handles().find((handle: TimelineHandle) => handle.target.type === 'cell' && handle.target.file === f.files[0] && handle.target.property === 'note.status')!;
+	badge.element.getBoundingClientRect = () => new win.DOMRect(100, 20, 40, 20) as any;
+	const hit = item.element.querySelector('.sabidurian-task-hit')!;
+	hit.addEventListener('mousedown', () => scheduleGestures++);
+	const stop = f.surface.beginAnnotation((handle: TimelineHandle) => received.push(handle), () => stopped++); assert.ok(stop);
+	const down = new win.MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: 110, clientY: 30 }); hit.dispatchEvent(down);
+	hit.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true, clientX: 110, clientY: 30 }));
+	assert.equal(down.defaultPrevented, true); assert.equal(scheduleGestures, 0); assert.equal(stopped, 1); assert.equal(received.length, 1);
+	assert.equal(received[0].target.type, 'cell'); assert.equal(received[0].current(), true); assert.deepEqual(f.writes, []);
+	stop(); assert.equal(stopped, 1);
+	hit.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true })); assert.equal(scheduleGestures, 1);
+  });
+
+  test(`${kind}: touch annotation leaves pan available and ignores the click following a drag`, () => {
+	const f = fixture(kind); let selected = 0, stopped = 0, touchHandlers = 0;
+	const item = f.surface.handles().find((handle: TimelineHandle) => handle.target.type === 'item')!;
+	const hit = item.element.querySelector('.sabidurian-task-hit')!;
+	hit.addEventListener('touchstart', () => touchHandlers++);
+	f.surface.beginAnnotation(() => selected++, () => stopped++);
+	hit.dispatchEvent(new win.MouseEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 10 }));
+	const touch = new win.Event('touchstart', { bubbles: true, cancelable: true }); hit.dispatchEvent(touch);
+	assert.equal(touch.defaultPrevented, false); assert.equal(touchHandlers, 0);
+	hit.dispatchEvent(new win.MouseEvent('pointermove', { bubbles: true, clientX: 50, clientY: 10 }));
+	hit.dispatchEvent(new win.MouseEvent('click', { bubbles: true, clientX: 50, clientY: 10 }));
+	assert.equal(selected, 0); assert.equal(stopped, 0); assert.deepEqual(f.writes, []);
+	hit.dispatchEvent(new win.MouseEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 10 }));
+	hit.dispatchEvent(new win.MouseEvent('click', { bubbles: true, clientX: 10, clientY: 10 }));
+	assert.equal(selected, 1); assert.equal(stopped, 1); assert.deepEqual(f.writes, []);
+  });
+
+  test(`${kind}: annotation guards close on Escape and unload`, () => {
+	const f = fixture(kind); let stopped = 0, selected = 0;
+	f.surface.beginAnnotation(() => selected++, () => stopped++);
+	document.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+	assert.equal(stopped, 1);
+	f.surface.beginAnnotation(() => selected++, () => stopped++); f.view.onunload();
+	assert.equal(stopped, 2); assert.equal(selected, 0); assert.equal(f.bridge.available, true);
+	f.bridge.dispose(); assert.equal(f.bridge.available, false); assert.equal(f.bridge.canNavigate(document), false);
+  });
+
+  test(`${kind}: leaving the window cancels annotation without retaining schedule interception`, () => {
+    const f = fixture(kind); let stopped = 0, gestures = 0;
+    const item = f.surface.handles().find((handle: TimelineHandle) => handle.target.type === 'item')!;
+    item.element.addEventListener('mousedown', () => gestures++);
+    f.surface.beginAnnotation(() => assert.fail('unexpected selection'), () => stopped++);
+    win.dispatchEvent(new win.Event('blur'));
+    item.element.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true }));
+    assert.equal(stopped, 1); assert.equal(gestures, 1);
+    f.surface.beginAnnotation(() => assert.fail('unexpected selection'), () => stopped++);
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    try { document.dispatchEvent(new win.Event('visibilitychange')); assert.equal(stopped, 2); }
+    finally { delete (document as any).hidden; }
   });
 
   test(`${kind}: ambiguous badge property names cannot fall back to whole-item selection`, () => {

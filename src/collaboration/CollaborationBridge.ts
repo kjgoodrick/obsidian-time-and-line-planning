@@ -1,4 +1,5 @@
 import type { BasesPropertyId, BasesView, EventRef, TFile } from 'obsidian';
+import { TaskInspector } from '../interaction/TaskInspector';
 
 declare module 'obsidian' {
   interface Workspace {
@@ -32,10 +33,11 @@ export interface TimelineSurfacePort {
 /** One lifetime per Bases view, retained across renderer replacement. */
 export class TimelineSurface {
   readonly protocolVersion = 1;
-  readonly capabilities = Object.freeze(['item', 'cell', 'selection', 'geometry', 'reveal'] as const);
+  readonly capabilities = Object.freeze(['item', 'cell', 'selection', 'geometry', 'reveal', 'annotation'] as const);
   private listeners = new Set<() => void>();
   private closed = false;
   private serial = 0;
+  private stopAnnotation?: () => void;
   constructor(private port: TimelineSurfacePort) {}
   get owner(): BasesView { return this.port.owner; }
   get root(): HTMLElement { return this.port.root; }
@@ -67,6 +69,50 @@ export class TimelineSurface {
     }
   }
   reveal(target: TimelineTarget): TimelineReveal { return this.viewport() && (target?.type === 'item' || target?.type === 'cell') ? this.port.reveal(target) : 'unavailable'; }
+  /** Explicit one-shot selection mode. Touch keeps native pan/zoom; schedule
+   * handlers never receive the gesture, compatibility mouse event or key. */
+  beginAnnotation(select: (handle: TimelineHandle) => void, stopped: () => void): (() => void) | undefined {
+    if (!this.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return;
+    this.stopAnnotation?.();
+    const cleanup: (() => void)[] = []; let live = true, start: TimelinePoint | undefined, dragged = false;
+    const listen = (target: EventTarget, type: string, handler: EventListener) => {
+      target.addEventListener(type, handler, true); cleanup.push(() => target.removeEventListener(type, handler, true));
+    };
+    const stop = () => {
+      if (!live) return; live = false;
+      for (const dispose of cleanup) dispose(); if (this.stopAnnotation === stop) this.stopAnnotation = undefined;
+      try { stopped(); } catch { /* Consumers cannot retain editing interception. */ }
+    };
+    this.stopAnnotation = stop;
+    listen(this.root, 'pointerdown', event => {
+      const pointer = event as PointerEvent; start = { clientX: pointer.clientX, clientY: pointer.clientY }; dragged = false;
+      event.stopImmediatePropagation();
+    });
+    listen(this.root, 'pointermove', event => {
+      const pointer = event as PointerEvent;
+      if (start && Math.hypot(pointer.clientX - start.clientX, pointer.clientY - start.clientY) > 8) dragged = true;
+    });
+    listen(this.root, 'pointercancel', () => { dragged = true; });
+    listen(this.root, 'touchstart', event => { event.stopImmediatePropagation(); });
+    for (const type of ['mousedown', 'contextmenu']) listen(this.root, type, event => { event.preventDefault(); event.stopImmediatePropagation(); });
+    listen(this.root, 'click', event => {
+      event.preventDefault(); event.stopImmediatePropagation();
+      const pointer = event as MouseEvent;
+      if (dragged || !this.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return;
+      const handle = event.target && this.hit(event.target as Node, pointer);
+      if (!handle?.current()) return;
+      stop(); select(handle);
+    });
+    listen(this.root, 'keydown', event => {
+      if ((event as KeyboardEvent).key === 'Tab') return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      if ((event as KeyboardEvent).key === 'Escape') stop();
+    });
+    listen(this.root.ownerDocument, 'keydown', event => { if ((event as KeyboardEvent).key === 'Escape') stop(); });
+    listen(this.root.ownerDocument, 'visibilitychange', () => { if (this.root.ownerDocument.hidden) stop(); });
+    const window = this.root.ownerDocument.defaultView; if (window) listen(window, 'blur', () => stop());
+    return stop;
+  }
   onChange(listener: () => void): () => void {
     if (this.closed) return () => {};
     this.listeners.add(listener); return () => { this.listeners.delete(listener); };
@@ -78,6 +124,7 @@ export class TimelineSurface {
   }
   dispose(): void {
     if (this.closed) return;
+    this.stopAnnotation?.();
     this.closed = true; this.serial++;
     for (const listener of [...this.listeners]) { try { listener(); } catch { /* Closing remains possible. */ } }
     this.listeners.clear();
@@ -87,9 +134,12 @@ export class TimelineSurface {
 /** Discoverable through workspace events in either plugin load order. */
 export class CollaborationBridge {
   readonly protocolVersion = 1;
+  readonly viewTypes = Object.freeze(['sabidurian-timeline', 'sabidurian-sequence'] as const);
   private surfaces = new Set<TimelineSurface>();
   private listeners = new Set<() => void>();
   private closed = false;
+  get available(): boolean { return !this.closed; }
+  canNavigate(document: Document): boolean { return !this.closed && !TaskInspector.hasDirty(document); }
   getSurfaces(): TimelineSurface[] { return this.closed ? [] : [...this.surfaces].filter(surface => surface.current()); }
   register(surface: TimelineSurface): () => void {
     if (this.closed) { surface.dispose(); return () => {}; }

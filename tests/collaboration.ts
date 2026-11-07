@@ -27,6 +27,7 @@ proto.createSpan = function(opts: any) { return this.createEl('span', opts); };
 proto.addClass = function(...classes: string[]) { this.classList.add(...classes); };
 proto.empty = function() { this.replaceChildren(); };
 proto.setText = function(text: string) { this.textContent = text; };
+proto.appendText = function(text: string) { this.append(document.createTextNode(text)); };
 (win.SVGElement.prototype as any).getBBox = () => ({ x: 0, y: 0, width: 40, height: 20 });
 const frames = new Map<number, FrameRequestCallback>(); let serial = 0;
 globalThis.requestAnimationFrame = callback => { frames.set(++serial, callback); return serial; };
@@ -86,6 +87,21 @@ function fixture(kind: 'timeline' | 'sequence', grouped = false, empty = false) 
   view.data = { data: empty ? [] : entries, groupedData: grouped && !empty ? [{ hasKey: () => true, key: 'Lane', entries }] : [] };
   view.onDataUpdated(); for (const callback of [...frames.values()]) callback(0); frames.clear();
   return { view, surface: view.collaboration, root, files, values, metadata, bridge, plugin, writes, configWrites };
+}
+
+for (const dense of [false, true]) for (const span of [false, true]) {
+  test(`Sequence accessible names and tooltips preserve decimal source positions (dense: ${dense}, span: ${span})`, () => {
+    const f = fixture('sequence');
+    f.values.denseMode = dense; f.values.orderEndProp = span ? 'note.orderEnd' : null;
+    f.view.data = { data: [{ file: f.files[0], getValue: (id: string) => id === 'note.order' ? 2.3 : id === 'note.orderEnd' ? 4.7 : null }], groupedData: [] };
+    f.view.onDataUpdated();
+    const handle = f.surface.handles().find((item: TimelineHandle) => item.target.type === 'item')!;
+    const position = span ? 'Position 2.3 → 4.7' : 'Position 2.3';
+    assert.equal(handle.element.getAttribute('aria-label'), `item-0, ${position}`);
+    handle.element.dispatchEvent(new win.MouseEvent('mouseenter', { clientX: 100, clientY: 100 }));
+    assert.ok([...document.querySelectorAll<HTMLElement>('.sabidurian-tooltip')].some(el => el.style.display !== 'none' && el.textContent?.includes(position)));
+    assert.deepEqual(f.writes, []); assert.deepEqual(f.configWrites, []);
+  });
 }
 
 for (const kind of ['timeline', 'sequence'] as const) {
@@ -304,7 +320,7 @@ for (const kind of ['timeline', 'sequence'] as const) {
     let selected: any;
     f.surface.beginAnnotation((handle: any) => { selected = handle; }, () => {});
     const picker = f.root.querySelector<HTMLSelectElement>('.sabidurian-annotation-picker select')!;
-    picker.value = [...picker.options].find(option => option.textContent?.startsWith('Lane:'))!.value;
+    picker.value = [...picker.options].find(option => option.textContent === 'Lane: Lane')!.value;
     picker.dispatchEvent(new win.Event('change', { bubbles: true }));
     assert.equal(heading.classList.contains('sabidurian-annotation-target'), true);
     picker.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));

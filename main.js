@@ -1393,7 +1393,7 @@ function sameTarget(left, right) {
 function label(handle) {
   var _a, _b;
   const target = handle.target;
-  if (target.type === "group") return `Lane: ${((_b = (_a = handle.element.querySelector("text")) == null ? void 0 : _a.textContent) == null ? void 0 : _b.trim()) || "Untitled lane"}`;
+  if (target.type === "group") return `Lane: ${((_b = (_a = handle.element.querySelector(".sabidurian-group-name")) == null ? void 0 : _a.textContent) == null ? void 0 : _b.trim()) || "Untitled lane"}`;
   return target.type === "cell" ? `Property: ${target.file.path} \u2014 ${target.property}` : `Item: ${target.file.path}`;
 }
 function annotationPicker(root, read, choose, cancel) {
@@ -2841,7 +2841,7 @@ var BarRenderer = class {
     var _a;
     group.setAttribute("role", "button");
     group.setAttribute("tabindex", "0");
-    group.setAttribute("aria-label", `${(_a = entry.displayLabel) != null ? _a : entry.label}, ${formatSabidurianDate(entry.start)}`);
+    group.setAttribute("aria-label", `${(_a = entry.displayLabel) != null ? _a : entry.label}, ${this.sequenceMode ? this.sequenceLabel(entry) : formatSabidurianDate(entry.start)}`);
     group.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
@@ -2884,9 +2884,16 @@ var BarRenderer = class {
     });
     group.style.cursor = "pointer";
   }
+  sequenceLabel(entry) {
+    var _a, _b, _c, _d, _e, _f;
+    const d2s = this.denseToSparse, rawStart = Math.round(entry.startYear), rawEnd = Math.round(entry.endYear) - 1;
+    const start = (_c = (_a = entry.sequencePosition) == null ? void 0 : _a.start) != null ? _c : d2s ? (_b = d2s[rawStart - 1]) != null ? _b : rawStart : rawStart;
+    const end = (_f = (_d = entry.sequencePosition) == null ? void 0 : _d.end) != null ? _f : d2s ? (_e = d2s[rawEnd - 1]) != null ? _e : rawEnd : rawEnd;
+    return end > start ? `Position ${start} \u2192 ${end}` : `Position ${start}`;
+  }
   /** Build tooltip content using safe DOM methods (no innerHTML). */
   showTooltip(entry, e) {
-    var _a, _b, _c;
+    var _a;
     if (!this.tooltipEl) return;
     if (this.svg.closest(".sabidurian-measure-mode")) {
       this.hideTooltip();
@@ -2897,15 +2904,8 @@ var BarRenderer = class {
     strong.textContent = (_a = entry.displayLabel) != null ? _a : entry.label;
     prependTaskImage(strong, entry.icon);
     if (this.sequenceMode) {
-      const d2s = this.denseToSparse;
-      const rawStart = Math.round(entry.startYear);
-      const rawEnd = Math.round(entry.endYear) - 1;
-      const startPos = d2s ? (_b = d2s[rawStart - 1]) != null ? _b : rawStart : rawStart;
-      const endPos = d2s ? (_c = d2s[rawEnd - 1]) != null ? _c : rawEnd : rawEnd;
       this.tooltipEl.createEl("br");
-      this.tooltipEl.appendText(
-        endPos > startPos ? `Position ${startPos} \u2192 ${endPos}` : `Position ${startPos}`
-      );
+      this.tooltipEl.appendText(this.sequenceLabel(entry));
     } else {
       this.tooltipEl.createEl("br");
       let dateText = formatDateRange(entry.start, entry.isPoint ? null : entry.end);
@@ -8424,6 +8424,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
       result.push({
         file,
         label: file.basename,
+        sequencePosition: { start: startPos, end: endPos },
         start: { year: startPos, month: 1, day: 1 },
         // Placeholder SabidurianDate
         end: { year: effectiveEndPos, month: 1, day: 1 },

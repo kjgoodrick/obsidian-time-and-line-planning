@@ -199,6 +199,18 @@ releases this guard. A disposed bridge returns false from this method.
 
 ## Explicit annotation selection
 
+November 7 native acceptance found that the picker read the lane's collapse
+glyph instead of its name. It now reads the dedicated rendered group-name node;
+identity and capture still come from the exact query group. The native menu now
+shows `Lane: Ready` in the integrated Team Relay test vault. Sequence item
+accessible names and tooltips also use their original ordinal positions rather
+than placeholder dates or rounded dense-layout coordinates. Native Obsidian
+announces `Note, Position 2.3`; automated checks cover decimal single positions
+and spans in both sparse and dense layouts. All 269 provider tests, typecheck,
+build/package and eight actual-source consumer interoperability cases pass.
+Native lane discussions save separately in Timeline and Sequence; this does not
+complete the physical-mobile, broad accessibility or lifecycle acceptance matrix.
+
 `surface.beginAnnotation(select, stopped)` enters one-shot target selection and
 returns an idempotent cleanup function, or undefined when unavailable or blocked
 by inspector changes. The consumer must expose an explicit entry/cancel control.

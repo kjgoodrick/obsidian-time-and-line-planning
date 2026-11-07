@@ -820,6 +820,7 @@ export class SequenceView extends BasesView {
       result.push({
         file,
         label: file.basename,
+        sequencePosition: { start: startPos, end: endPos },
         start: { year: startPos, month: 1, day: 1 } as any, // Placeholder SabidurianDate
         end: { year: effectiveEndPos, month: 1, day: 1 } as any,
         startYear: startPos,

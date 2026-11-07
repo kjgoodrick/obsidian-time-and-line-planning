@@ -10,7 +10,7 @@ function sameTarget(left: TimelineSelectionHandle, right: TimelineSelectionHandl
 
 function label(handle: TimelineSelectionHandle): string {
   const target = handle.target;
-  if (target.type === 'group') return `Lane: ${handle.element.querySelector('text')?.textContent?.trim() || 'Untitled lane'}`;
+  if (target.type === 'group') return `Lane: ${handle.element.querySelector('.sabidurian-group-name')?.textContent?.trim() || 'Untitled lane'}`;
   return target.type === 'cell' ? `Property: ${target.file.path} — ${target.property}` : `Item: ${target.file.path}`;
 }
 

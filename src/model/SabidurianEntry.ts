@@ -15,6 +15,8 @@ export interface SabidurianEntry {
   icon?: TaskIcon;
   /** Raw mapped dates at render time, for conflict-safe pointer edits. */
   dateValues?: Record<string, unknown>;
+  /** Original ordinal positions, before dense-axis layout changes. */
+  sequencePosition?: { start: number; end: number };
   /** Parsed start date. */
   start: SabidurianDate;
   /** Parsed end date, or null for point events. */

@@ -128,10 +128,20 @@ Lane reveal validates the exact source group before changing the viewport and
 preserves its collapsed state. Rebuilding the viewport invalidates previously
 captured geometry and selection contexts; consumers must reacquire them.
 
-An empty/invalid query without a live axis still returns unavailable; it cannot
-navigate a detached old renderer. The companion consumer owns the range comment
-form, saved decorations and persistence. Presence and shared milestones remain
-unfinished.
+Empty results and records without plottable dates/order values retain a real
+axis when its saved configuration is valid. A new empty Timeline starts with
+the current civil day in its configured timezone; Sequence starts with original
+positions 1–10. Existing range focus survives records disappearing/reappearing.
+Range selection, projection, distant reveal and return work without task bars.
+An empty axis has no task editing handlers, and no last-task lookup can create
+invalid dates. Existing source lanes remain identifiable even when their records
+have no plottable coordinates; removed lanes cannot become whole-view ranges.
+
+Missing/invalid axis configuration remains unavailable. Replaced query results
+invalidate the consumer's old host binding, which must be inspected and bound
+again before using the new empty axis. Detached renderer/task/lane handles never
+become valid locations. The companion consumer owns the range comment form,
+saved decorations and persistence. Presence and shared milestones remain unfinished.
 
 ## Navigation safety
 
@@ -171,7 +181,7 @@ keyboard accessibility and native host acceptance remain release gates.
 
 ## Verification and remaining work
 
-`npm run package` passes 223 synthetic regressions, TypeScript checking, production
+`npm run package` passes 231 synthetic regressions, TypeScript checking, production
 build and deterministic plugin-only packaging. The bridge cases use the real
 Timeline/Sequence views and renderers with the existing Happy DOM host adapter.
 They cover item/badge identity, aliases, re-render/rename, coordinate hit testing,
@@ -186,7 +196,9 @@ Range regressions additionally cover the shared coordinate corpus, exact decimal
 projection, dense values, DST ambiguity, CE/BCE boundary conversion, mouse/touch/
 keyboard selection, distant range focus/return, exact collapsed lanes, dense
 Sequence restoration, bounded billion-year scales, stale axes, inspector drafts,
-delayed viewport callbacks and no scheduling writes. Separate actual-service checks cover group
+delayed viewport callbacks, initially empty views, invalid record coordinates,
+query disappearance/reappearance, missing axis configuration and no scheduling
+writes. Separate actual-service checks cover group
 authorization and offline recovery in both saved-view types; these do not replace
 the native interaction matrix.
 

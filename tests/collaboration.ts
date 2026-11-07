@@ -36,7 +36,7 @@ afterEach(() => {
   frames.clear(); document.body.replaceChildren();
 });
 
-function fixture(kind: 'timeline' | 'sequence', grouped = false) {
+function fixture(kind: 'timeline' | 'sequence', grouped = false, empty = false) {
   const files = [0, 1].map(index => ({ path: `Tasks/item-${index}.md`, basename: `item-${index}`, parent: { path: 'Tasks' } }));
   const metadata = new Map(files.map(file => [file.path, { start: '2026-11-26T08:00:00Z', end: '2026-11-26T09:00:00Z', status: 'Ready', title: 'Same name' }]));
   const entries = files.map((file, index) => ({ file, getValue: (id: string) => id === 'note.order' ? index + 1 : id === 'formula.total' ? index + 20 : (metadata.get(file.path) as any)[id.replace(/^note\./, '')] }));
@@ -57,7 +57,7 @@ function fixture(kind: 'timeline' | 'sequence', grouped = false) {
   view.config = { get: (key: string) => values[key], set: (key: string, value: unknown) => { configWrites.push([key, value]); values[key] = value; },
     getAsPropertyId: (key: string) => values[key] ?? null, getOrder: () => [], getDisplayName: (id: string) => 'Alias for ' + id };
   view.allProperties = ['note.status', 'formula.total'];
-  view.data = { data: entries, groupedData: grouped ? [{ hasKey: () => true, key: 'Lane', entries }] : [] };
+  view.data = { data: empty ? [] : entries, groupedData: grouped && !empty ? [{ hasKey: () => true, key: 'Lane', entries }] : [] };
   view.onDataUpdated(); for (const callback of [...frames.values()]) callback(0); frames.clear();
   return { view, surface: view.collaboration, root, files, values, metadata, bridge, plugin, writes, configWrites };
 }
@@ -120,11 +120,12 @@ for (const kind of ['timeline', 'sequence'] as const) {
     assert.equal(f.surface.reveal({ type: 'item', file: f.files[1] }), 'revealed'); assert.deepEqual(f.writes, []);
   });
 
-  test(`${kind}: empty results invalidate old geometry and cannot reveal a detached renderer`, () => {
-    const f = fixture(kind), captured = f.surface.handles()[0];
+  test(`${kind}: empty results replace the old renderer with a live range axis but cannot reveal removed tasks`, () => {
+    const f = fixture(kind), captured = f.surface.handles()[0], previous = f.surface.viewport();
     f.view.data = { data: [], groupedData: [] }; f.view.onDataUpdated();
     assert.equal(captured.current(), false); assert.deepEqual(f.surface.handles(), []);
-    assert.equal(f.surface.viewport(), undefined); assert.equal(f.surface.reveal({ type: 'item', file: f.files[0] }), 'unavailable');
+    assert.equal(previous.isConnected, false); assert.notEqual(f.surface.viewport(), previous);
+    assert.ok(f.surface.rangeContext()?.current()); assert.equal(f.surface.reveal({ type: 'item', file: f.files[0] }), 'unavailable');
   });
 
   test(`${kind}: collapsed lane annotation preserves its exact source and never toggles the lane`, () => {
@@ -367,6 +368,76 @@ const distantRange = (sequence: boolean) => parseTimelineRange(sequence ? { ...o
   version: 1, kind: 'calendar', start: '1800-01-01', end: '1800-01-02', time_zone: 'UTC', start_inclusive: true, end_inclusive: true });
 
 for (const kind of ['timeline', 'sequence'] as const) {
+  test(`${kind}: an initially empty view supports range selection, distant navigation and return without task editing`, () => {
+    const f = fixture(kind, false, true); f.values.locked = false; f.view.onDataUpdated(); flushFrames();
+    const { viewport, svg } = rangeLayout(f, false), context = f.surface.rangeContext()!, selected: any[] = [];
+    assert.ok(context.current()); assert.deepEqual(f.surface.handles(), []); assert.deepEqual(f.surface.groups(), []);
+    assert.ok(f.root.querySelector('.sabidurian-empty-axis-message'));
+    assert.equal(f.view.dragManager, null); assert.equal(f.view.keyboardManager, null); assert.equal(f.view.touchManager, null);
+    assert.equal(f.values.locked, false);
+    viewport.scrollLeft = 21; viewport.scrollTop = 17;
+    assert.ok(f.surface.beginRange(kind === 'sequence' ? 'ordinal' : 'calendar', 'day', (value: any) => selected.push(value), () => {}));
+    const status = f.root.querySelector('.sabidurian-range-selection-status')!;
+    for (const key of ['Enter', 'ArrowRight', 'Enter']) status.dispatchEvent(new win.KeyboardEvent('keydown', { bubbles: true, key }));
+    assert.equal(selected.length, 1); assert.ok(selected[0].current()); assert.ok(parseTimelineRange(selected[0].draft));
+    svg.dispatchEvent(new win.MouseEvent('click', { bubbles: true, clientX: 120 }));
+    const range = distantRange(kind === 'sequence');
+    assert.equal(f.surface.revealRange(range, context.axis), 'revealed'); flushFrames();
+    assert.equal(context.current(), false); assert.equal(selected[0].current(), false);
+    const focused = [f.view.axis.viewStart, f.view.axis.viewEnd]; f.view.onDataUpdated(); flushFrames();
+    assert.deepEqual([f.view.axis.viewStart, f.view.axis.viewEnd], focused);
+    f.root.querySelector<HTMLButtonElement>('.sabidurian-comment-range-focus button')!.click(); flushFrames();
+    assert.equal(f.root.querySelector('.sabidurian-comment-range-focus'), null); assert.ok(f.surface.rangeContext()?.current());
+    assert.ok(Math.abs(f.surface.viewport().scrollLeft - 21) < 0.00001); assert.equal(f.surface.viewport().scrollTop, 17);
+    assert.deepEqual(f.writes, []); assert.deepEqual(f.configWrites, []);
+    if (kind === 'timeline') {
+      f.view.applyLockState(false);
+      assert.equal(f.root.querySelector<HTMLButtonElement>('.sabidurian-new-task-btn')!.disabled, true);
+    }
+  });
+
+  test(`${kind}: ranges remain available when every record has an invalid coordinate, including exact source lanes`, () => {
+    const f = fixture(kind, true), group = f.view.data.groupedData[0];
+    if (kind === 'timeline') for (const file of f.files) f.metadata.set(file.path, { ...f.metadata.get(file.path)!, start: 'invalid', end: 'invalid' });
+    for (const entry of group.entries) {
+      const get = entry.getValue;
+      entry.getValue = (property: string) => [kind === 'sequence' ? 'note.order' : 'note.start', 'note.end'].includes(property) ? null : get(property);
+    }
+    f.view.onDataUpdated(); flushFrames();
+    assert.equal(f.view.currentEntries.length, 0); assert.ok(f.surface.rangeContext()?.current());
+    assert.equal(f.surface.groups()[0].target.group, group);
+    const range = distantRange(kind === 'sequence'), axis = f.surface.rangeContext()!.axis;
+    assert.equal(f.surface.revealRange(range, axis, group), 'revealed');
+    assert.equal(f.surface.groups()[0].target.group, group); assert.deepEqual(f.values.collapsedGroups, ['Lane']);
+    f.view.data = { data: [], groupedData: [] }; f.view.onDataUpdated(); flushFrames();
+    assert.equal(f.surface.revealRange(range, axis, group), 'unavailable'); assert.deepEqual(f.surface.groups(), []);
+    assert.deepEqual(f.writes, []); assert.deepEqual(f.configWrites, []);
+  });
+
+  test(`${kind}: filters can hide and restore every task while a range keeps its axis identity`, () => {
+    const f = fixture(kind), data = f.view.data, context = f.surface.rangeContext()!, range = distantRange(kind === 'sequence');
+    assert.equal(f.surface.revealRange(range, context.axis), 'revealed');
+    const focused = [f.view.axis.viewStart, f.view.axis.viewEnd];
+    f.view.data = { data: [], groupedData: [] }; f.view.onDataUpdated(); flushFrames();
+    assert.deepEqual([f.view.axis.viewStart, f.view.axis.viewEnd], focused); assert.deepEqual(f.surface.rangeContext()!.axis, context.axis);
+    assert.equal(f.surface.reveal({ type: 'item', file: f.files[0] }), 'unavailable');
+    f.view.data = data; f.view.onDataUpdated(); flushFrames();
+    assert.deepEqual([f.view.axis.viewStart, f.view.axis.viewEnd], focused);
+    assert.equal(f.surface.reveal({ type: 'item', file: f.files[0] }), 'revealed'); flushFrames();
+    assert.equal(f.root.querySelector('.sabidurian-comment-range-focus'), null);
+    assert.equal(f.view.currentEntries.length, 2); assert.deepEqual(f.writes, []); assert.deepEqual(f.configWrites, []);
+  });
+
+  test(`${kind}: an empty view with missing axis configuration never substitutes a guessed axis`, () => {
+    const f = fixture(kind, false, true), context = f.surface.rangeContext()!, viewport = f.surface.viewport();
+    f.values[kind === 'sequence' ? 'orderProp' : 'startDateProp'] = undefined;
+    f.view.onDataUpdated(); flushFrames();
+    assert.equal(context.current(), false); assert.equal(viewport.isConnected, false);
+    assert.equal(f.surface.rangeContext(), undefined); assert.equal(f.surface.viewport(), undefined);
+    assert.equal(f.surface.revealRange(distantRange(kind === 'sequence'), context.axis), 'unavailable');
+    assert.deepEqual(f.writes, []); assert.deepEqual(f.configWrites, []);
+  });
+
   test(`${kind}: range focus preserves data/settings, survives refresh and returns to the original viewport`, () => {
     const f = fixture(kind), before = JSON.stringify(f.values), { viewport } = rangeLayout(f, false);
     const bounds = [f.view.axis.viewStart, f.view.axis.viewEnd], context = f.surface.rangeContext()!;

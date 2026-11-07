@@ -1763,6 +1763,7 @@ body.theme-dark {
 .sabidurian-comment-range-focus { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
 .sabidurian-comment-range-focus > span:first-child { max-width: min(40vw, 32rem); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sabidurian-comment-range-focus > span { color: var(--text-muted); }
+.sabidurian-empty-axis-message { margin: 8px 12px; color: var(--text-muted); font-size: var(--font-ui-small); }
 .sabidurian-comment-range-selection line {
   stroke: var(--interactive-accent);
   stroke-width: 2;

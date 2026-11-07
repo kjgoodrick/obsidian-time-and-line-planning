@@ -11,7 +11,7 @@ npm ci
 npm run package
 ```
 
-Packaging runs TypeScript checking, the 223-test regression suite, the production build, and creation of a deterministic plugin-only ZIP. The DOM suites use Happy DOM and a small Obsidian API fixture; they do not execute the native Obsidian app. The optional [collaboration bridge](COLLABORATION.md) checks include explicit annotation, exact lane identity, dirty-inspector navigation, range coordinate projection and mouse/touch/keyboard range selection. Team Relay's source interoperability fixture exercises both real view types and load orders with and without grouping, including range confirmation, exact lane markers and temporary navigation outside the data-derived axis. Native acceptance and remaining timeline targets are pending.
+Packaging runs TypeScript checking, the 231-test regression suite, the production build, and creation of a deterministic plugin-only ZIP. The DOM suites use Happy DOM and a small Obsidian API fixture; they do not execute the native Obsidian app. The optional [collaboration bridge](COLLABORATION.md) checks include explicit annotation, exact lane identity, dirty-inspector navigation, range coordinate projection and mouse/touch/keyboard range selection. Team Relay's source interoperability fixture exercises both real view types and load orders with and without grouping, including range confirmation, exact lane markers, temporary navigation outside the data-derived axis and rebinding to empty query results. Native acceptance and remaining timeline targets are pending.
 
 Coverage includes:
 
@@ -27,6 +27,10 @@ Coverage includes:
   collapsed lanes, original viewport and dense Sequence layout. Tests cover
   changed axes, dirty inspectors, pending scroll callbacks, exact large decimals
   and bounded grids for billion-year historical intervals.
+- Empty/invalid-coordinate results retain a valid configured range axis and
+  invalidate prior task/lane handles. The cross-plugin check exercises the new
+  saved-view binding, range form/selection, whole-view markers and missing-lane
+  refusal after results disappear. No task editing handlers run on an empty axis.
 
 ## Prior native desktop validation
 

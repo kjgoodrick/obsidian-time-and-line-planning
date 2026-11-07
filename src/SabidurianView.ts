@@ -4,7 +4,7 @@ import { iconLabel, resolveTaskIcon } from './model/taskIcons';
 import { TaskInspector, TaskPicker, NewTaskModal, type TaskFields } from './interaction/TaskInspector';
 import { axisToWallMs, wallToInstant, offsetISO, instantToWallMs, wallMsToAxis } from './utils/timezone';
 import { TimelineSurface, type TimelineTarget, type TimelineReveal } from './collaboration/CollaborationBridge';
-import type { RangeAxis, RangeState } from './collaboration/RangeProjection';
+import { axisDescriptor, type RangeAxis, type RangeState } from './collaboration/RangeProjection';
 import type { TimelineRange } from './collaboration/TimelineRange';
 import { createRangeFocus, rangeFocusCurrent, renderRangeFocus, type RangeFocus } from './collaboration/RangeFocus';
 import { BasesView, Notice, QueryController, setIcon } from 'obsidian';
@@ -165,9 +165,12 @@ export class SabidurianView extends BasesView {
       }
     }
     this.lockUpdateState = null;
+    const hadEntries = this.currentEntries.length > 0;
+    this.currentEntries = []; this.currentGroups = [];
     this.barRenderer?.invalidateCollaboration(); this.collaboration.changed();
     // Preserve scroll position across re-renders
-    const previous = changedFocus ? null : this.pendingViewport ?? (this.timelineRenderer ? {
+    const requestedViewport = this.pendingViewport !== null;
+    let previous = changedFocus ? null : this.pendingViewport ?? (this.timelineRenderer ? {
       year: this.axis.pixelToYear(this.timelineRenderer.element.scrollLeft),
       top: this.timelineRenderer.element.scrollTop,
     } : null);
@@ -212,10 +215,6 @@ export class SabidurianView extends BasesView {
     this.rootEl = this.scrollEl.createDiv({ cls: 'sabidurian-container' });
 
     const entries = this.data?.data ?? [];
-    if (entries.length === 0) {
-      this.renderEmptyState();
-      return;
-    }
 
     this.timeZone = String(this.config.get('timeZone') || Intl.DateTimeFormat().resolvedOptions().timeZone);
     try { this.scheduling = new Scheduling(Number(this.config.get('snapMinutes') || 5), this.timeZone); }
@@ -290,8 +289,15 @@ export class SabidurianView extends BasesView {
     this.currentGroups = sabidurianGroups;
 
     if (sabidurianEntries.length === 0) {
-      this.renderEmptyState('No entries have valid dates. Configure the Start date property above.');
-      return;
+      if (!axisDescriptor({ config: this.config, renderer: 'sabidurian-timeline' })) {
+        this.renderEmptyState('Configure a valid Start date property to display the timeline.'); return;
+      }
+      this.rootEl.createEl('p', { cls: 'sabidurian-empty-axis-message', attr: { role: 'status' }, text: entries.length ?
+        'No entries have valid dates. The empty timeline remains available for range navigation.' :
+        'No entries match this view. The empty timeline remains available for range navigation.' });
+    }
+    if (!this.rangeFocus && !requestedViewport && (!hadEntries || !sabidurianEntries.length)) {
+      previous = null; this.pendingViewport = null; this._hasRendered = false;
     }
 
     // Performance warning when entry count exceeds plugin setting
@@ -554,6 +560,7 @@ export class SabidurianView extends BasesView {
     if (!this.timelineRenderer) return;
     const mode = (this.config.get('initialScroll') as string | undefined) ?? 'today';
     const body = this.timelineRenderer.element;
+    if (!this.currentEntries.length) { body.scrollLeft = 0; body.scrollTop = 0; return; }
 
     const focus = parseSabidurianDate(this.config.get('focusDate'), this.timeZone);
     if (focus && mode !== 'start') {
@@ -687,6 +694,12 @@ export class SabidurianView extends BasesView {
           this.rootEl?.querySelector('.sabidurian-measure-btn')?.classList.remove('sabidurian-measure-active');
         }
       }, true); // Capture phase — before KeyboardManager
+    }
+
+    // An empty axis supports range annotation/measurement, not task editing.
+    if (!this.currentEntries.length) {
+      this.timelineRenderer.element.style.touchAction = 'pan-x pan-y';
+      this.timelineRenderer.raiseTodayMarker(); this.collaboration.changed(); return;
     }
 
     // ── Dependency arrows (visible entries only) ──
@@ -837,7 +850,7 @@ export class SabidurianView extends BasesView {
   }
 
   private rangeState(): RangeState | undefined {
-    return this.timelineRenderer && this.currentEntries.length ? { axis: this.axis, config: this.config, renderer: 'sabidurian-timeline',
+    return this.timelineRenderer?.element.isConnected && this.scrollEl.contains(this.timelineRenderer.element) ? { axis: this.axis, config: this.config, renderer: 'sabidurian-timeline',
       svg: this.timelineRenderer.svgElement, viewport: this.timelineRenderer.element, timeZone: this.timeZone } : undefined;
   }
 
@@ -1169,6 +1182,13 @@ export class SabidurianView extends BasesView {
     viewEnd: number;
     range: number;
   } {
+    if (!entries.length) {
+      // A civil day in the configured zone supplies real coordinates even when
+      // filters hide every record. Focused discussions override these bounds.
+      const day = Math.floor(instantToWallMs(Date.now(), this.timeZone) / 86400000) * 86400000;
+      const viewStart = wallMsToAxis(day), viewEnd = wallMsToAxis(day + 86400000);
+      return { viewStart, viewEnd, range: viewEnd - viewStart };
+    }
     let minYear = Infinity;
     let maxYear = -Infinity;
 
@@ -1325,12 +1345,14 @@ export class SabidurianView extends BasesView {
 
     controlsEl.createSpan({ text: this.timeZone, cls: 'sabidurian-zone' });
     const find = controlsEl.createEl('button', { text: 'Find task…' });
+    find.disabled = entryCount === 0;
     find.onclick = () => new TaskPicker(this.plugin.app, this.currentEntries.map(e => e.file), this.taskFields(), file => this.revealTask(file)).open();
     const undo = controlsEl.createEl('button', { text: 'Undo' });
     undo.disabled = !this.plugin.history.canUndo;
     undo.onclick = async () => { try { await this.plugin.history.undo(); this.onDataUpdated(); } catch (e) { new Notice(String(e)); } };
-    const create = controlsEl.createEl('button', { text: 'New task', cls: 'sabidurian-new-task-btn' }); create.disabled = this._locked;
+    const create = controlsEl.createEl('button', { text: 'New task', cls: 'sabidurian-new-task-btn' }); create.disabled = this._locked || entryCount === 0;
     create.onclick = () => {
+      if (!this.currentEntries.length) return;
       const latest = Math.max(...this.currentEntries.map(e => e.startYear));
       this.openNewTask(String(this.yearToDateStr(latest, 'minute')));
     };
@@ -1469,7 +1491,7 @@ export class SabidurianView extends BasesView {
       if (label) label.textContent = locked ? 'Locked' : 'Editing';
     }
     const create = this.rootEl?.querySelector<HTMLButtonElement>('.sabidurian-new-task-btn');
-    if (create) create.disabled = locked;
+    if (create) create.disabled = locked || !this.currentEntries.length;
   }
 
   private renderSkeleton(): void {

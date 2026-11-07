@@ -40,7 +40,7 @@ import { ViewportCuller, type ViewportBounds } from './model/ViewportCuller';
 import { confirmAction } from './utils/confirmModal';
 import { TimelineSurface, type TimelineTarget, type TimelineReveal } from './collaboration/CollaborationBridge';
 import { TaskInspector } from './interaction/TaskInspector';
-import type { RangeAxis, RangeState } from './collaboration/RangeProjection';
+import { axisDescriptor, type RangeAxis, type RangeState } from './collaboration/RangeProjection';
 import type { TimelineRange } from './collaboration/TimelineRange';
 import { createRangeFocus, rangeFocusCurrent, renderRangeFocus, type RangeFocus } from './collaboration/RangeFocus';
 
@@ -138,9 +138,12 @@ export class SequenceView extends BasesView {
   onDataUpdated(): void {
     const changedFocus = !!this.rangeFocus && !rangeFocusCurrent(this.rangeFocus, this.config, 'sabidurian-sequence', null);
     if (changedFocus) { this.rangeFocus = undefined; this.rangeReturn = undefined; this.pendingViewport = { left: 0, top: 0 }; }
+    const hadEntries = this.currentEntries.length > 0;
+    this.currentEntries = []; this.currentGroups = []; this._allParsedEntries = [];
     this.barRenderer?.invalidateCollaboration(); this.collaboration.changed();
-    const prevScrollLeft = this.pendingViewport?.left ?? this.timelineRenderer?.element.scrollLeft ?? 0;
-    const prevScrollTop = this.pendingViewport?.top ?? this.timelineRenderer?.element.scrollTop ?? 0;
+    const requestedViewport = this.pendingViewport !== undefined;
+    let prevScrollLeft = this.pendingViewport?.left ?? this.timelineRenderer?.element.scrollLeft ?? 0;
+    let prevScrollTop = this.pendingViewport?.top ?? this.timelineRenderer?.element.scrollTop ?? 0;
     this.pendingViewport = undefined;
     if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
     this.restoreFrame = null;
@@ -155,10 +158,6 @@ export class SequenceView extends BasesView {
     this.rootEl = this.scrollEl.createDiv({ cls: 'sabidurian-container sabidurian-sequence-container' });
 
     const entries = this.data?.data ?? [];
-    if (entries.length === 0) {
-      this.renderEmptyState();
-      return;
-    }
 
     // Read config
     const orderPropId = this.config.getAsPropertyId('orderProp');
@@ -221,9 +220,14 @@ export class SequenceView extends BasesView {
     this._allParsedEntries = sabidurianEntries;
 
     if (sabidurianEntries.length === 0) {
-      this.renderEmptyState('No entries have a valid order value. Configure the Order property above.');
-      return;
+      if (!axisDescriptor({ config: this.config, renderer: 'sabidurian-sequence' })) {
+        this.renderEmptyState('Configure a valid Order property to display the sequence.'); return;
+      }
+      this.rootEl.createEl('p', { cls: 'sabidurian-empty-axis-message', attr: { role: 'status' }, text: entries.length ?
+        'No entries have valid order values. The empty sequence remains available for range navigation.' :
+        'No entries match this view. The empty sequence remains available for range navigation.' });
     }
+    if (!this.rangeFocus && !requestedViewport && (!hadEntries || !sabidurianEntries.length)) { prevScrollLeft = 0; prevScrollTop = 0; }
 
     // Performance warning
     if (sabidurianEntries.length > this.plugin.settings.maxEntries) {
@@ -249,6 +253,8 @@ export class SequenceView extends BasesView {
 
     if (this.rangeFocus) {
       viewStart = this.rangeFocus.viewStart; viewEnd = this.rangeFocus.viewEnd; stepCount = 8;
+    } else if (!sabidurianEntries.length) {
+      viewStart = 0.5; viewEnd = 10.5; stepCount = 10;
     } else if (denseMode && sortedOccupied.length > 0) {
       // Build sparse → dense mapping
       const sparseToDense = new Map<number, number>();
@@ -499,6 +505,10 @@ export class SequenceView extends BasesView {
 
     // Render bars
     this.barRenderer.render(entriesToRender, (row) => this.layoutEngine.getRowY(row));
+    if (!this.currentEntries.length) {
+      this.timelineRenderer.element.style.touchAction = 'pan-x pan-y';
+      this.collaboration.changed(); return;
+    }
 
     // Arrows
     if (this._showArrows) {
@@ -685,7 +695,7 @@ export class SequenceView extends BasesView {
   }
 
   private rangeState(): RangeState | undefined {
-    return this.timelineRenderer && this.currentEntries.length ? { axis: this.axis, config: this.config, renderer: 'sabidurian-sequence',
+    return this.timelineRenderer?.element.isConnected && this.scrollEl.contains(this.timelineRenderer.element) ? { axis: this.axis, config: this.config, renderer: 'sabidurian-sequence',
       svg: this.timelineRenderer.svgElement, viewport: this.timelineRenderer.element, denseValues: this._denseToSparse } : undefined;
   }
 

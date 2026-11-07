@@ -52,3 +52,9 @@ Opening a range outside the displayed axis temporarily focuses that interval;
 original property values during this temporary focus. Native acceptance, shared
 markers and presence remain unfinished. Navigation adds no task writes or
 settings synchronization.
+
+An empty result set keeps the configured axis available for range comments,
+including when no task has a plottable date or order value. An empty Timeline
+starts at the current day in its timezone; an empty Sequence shows positions
+1–10. Saved range focus survives filters hiding and restoring the tasks. Missing
+axis configuration must still be corrected before range commenting is available.

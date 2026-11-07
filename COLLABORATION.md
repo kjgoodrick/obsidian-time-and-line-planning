@@ -5,8 +5,9 @@ The planning fork exposes a versioned local integration bridge for
 targeting, selection, visible geometry, guarded navigation, explicit annotation
 selection and lifecycle notifications. Team Relay's development consumer connects
 these to its saved-view comment controls. It does **not** yet provide the complete
-timeline comment feature: typed lanes, ranges, shared calendar markers, presence
-and native desktop/mobile acceptance remain.
+timeline comment feature: ranges, shared calendar markers, presence and native
+desktop/mobile acceptance remain. Lane headers now expose exact query group
+objects; the consumer derives typed targets with its existing authorization.
 
 ## Discovery and lifetime
 
@@ -34,7 +35,7 @@ hold at the point of use. Closing either the view or bridge invalidates handles.
 ## Targets and geometry
 
 The advertised capabilities are `item`, `cell`, `selection`, `geometry`,
-`reveal`, and `annotation`. Only registered renderer objects supply handles; text labels, SVG row
+`reveal`, `annotation`, and `groups`. Only registered renderer objects supply handles; text labels, SVG row
 order, CSS selectors and file-path attributes are not used as durable identities.
 
 | Target | Local identity |
@@ -60,6 +61,26 @@ saved-view definition and source generation, checks permissions and chooses whic
 authorized discussions to display. The bridge has no account, shared registry,
 message storage, transport or authorization implementation.
 
+`groups()` returns up to 256 mounted SVG lane headers as
+`{ target: { type: 'group', group: BasesEntryGroup }, element, current }`.
+`groupHit(node)` resolves a descendant to exactly one header. The renderer stores
+the original query group on its layout model before any manual ordering; equal
+display labels, collapsed lanes and row packing do not replace that reference.
+Changed/removed query objects and repaint/unload invalidate old handles.
+
+The consumer verifies each source object belongs to the bound query, derives
+typed values from `entry.getValue(groupingProperty)`, and offers explicit choices
+when a native header combines different typed values. A group key's `toString()`,
+header text, row index or first record is never the comment identity. Source
+membership is evidence to verify, not a permission grant.
+
+`revealGroup(group)` scrolls only vertically to the exact mounted header. It
+preserves horizontal position, lane collapse, filters and saved settings, and
+honors dirty inspectors. It returns unavailable for a replacement object, even
+one with identical text. The consumer refuses navigation when the same typed
+value has more than one distinct header. Formula groups and unsupported metadata
+remain subject to the consumer's capability and dependency-authorization gates.
+
 ## Navigation safety
 
 `reveal(target)` returns `revealed`, `hidden`, `property-hidden`, `ambiguous`,
@@ -81,6 +102,8 @@ releases this guard. A disposed bridge returns false from this method.
 `surface.beginAnnotation(select, stopped)` enters one-shot target selection and
 returns an idempotent cleanup function, or undefined when unavailable or blocked
 by inspector changes. The consumer must expose an explicit entry/cancel control.
+The selection callback accepts either an item/cell handle or a group handle.
+Lane header selection is intercepted before its normal collapse action.
 Capture listeners prevent task editing, mouse compatibility gestures, context
 menus and scheduling keys. A click/tap resolves the exact current handle, removes
 the listeners, calls `stopped`, then synchronously calls `select(handle)`. It does
@@ -96,15 +119,19 @@ keyboard accessibility and native host acceptance remain release gates.
 
 ## Verification and remaining work
 
-`npm run package` passes 93 synthetic regressions, TypeScript checking, production
-build and deterministic plugin-only packaging. The 21 bridge cases use the real
+`npm run package` passes 101 synthetic regressions, TypeScript checking, production
+build and deterministic plugin-only packaging. The 29 bridge cases use the real
 Timeline/Sequence views and renderers with the existing Happy DOM host adapter.
 They cover item/badge identity, aliases, re-render/rename, coordinate hit testing,
 viewport clipping, selection preservation, collapsed groups, dirty inspector
 navigation, empty results, ambiguous properties, explicit annotation, touch-drag
-suppression, blur/visibility cleanup and disposal. Team Relay also has a source
+suppression, blur/visibility cleanup, exact lane identity, collapsed-lane
+selection/navigation, equal labels, query replacement and disposal. Team Relay also has a source
 interoperability script that bundles both plugins' real view/bridge/client/adapter
-code against a synthetic Obsidian host, covering both view types and load orders.
+code against a synthetic Obsidian host, covering both view types and load orders,
+including typed lane source capture. Separate actual-service checks cover group
+authorization and offline recovery in both saved-view types; these do not replace
+the native interaction matrix.
 
 These tests do not establish native Obsidian desktop/mobile acceptance, rendered
 touch targets or battery behavior. No test vault or production plugin has been

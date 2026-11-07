@@ -125,6 +125,47 @@ for (const kind of ['timeline', 'sequence'] as const) {
     assert.equal(f.surface.viewport(), undefined); assert.equal(f.surface.reveal({ type: 'item', file: f.files[0] }), 'unavailable');
   });
 
+  test(`${kind}: collapsed lane annotation preserves its exact source and never toggles the lane`, () => {
+    const f = fixture(kind, true), group = f.view.data.groupedData[0], handles = f.surface.groups();
+    assert.equal(handles.length, 1); assert.equal(handles[0].target.group, group);
+    const heading = handles[0].element, before = JSON.stringify(f.values); let selected: any, stopped = 0;
+    f.surface.beginAnnotation((handle: any) => { selected = handle; }, () => stopped++);
+    heading.querySelector('text')!.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
+    assert.equal(selected.target.type, 'group'); assert.equal(selected.target.group, group); assert.equal(stopped, 1);
+    assert.equal(selected.current(), true); assert.equal(JSON.stringify(f.values), before); assert.deepEqual(f.configWrites, []);
+    assert.deepEqual(f.writes, []); assert.equal(heading.getAttribute('aria-expanded'), 'false');
+  });
+
+  test(`${kind}: lane reveal changes only vertical scroll and respects dirty inspector drafts`, () => {
+    const f = fixture(kind, true), group = f.view.data.groupedData[0], body = f.surface.viewport()!;
+    body.scrollLeft = 75; body.scrollTop = 400; const before = JSON.stringify(f.values);
+    assert.equal(f.surface.revealGroup(group), 'revealed'); assert.equal(body.scrollLeft, 75); assert.ok(body.scrollTop >= 0 && body.scrollTop < 400);
+    assert.equal(JSON.stringify(f.values), before); assert.deepEqual(f.configWrites, []); assert.deepEqual(f.writes, []);
+    const modal = new TaskInspector(f.plugin.app as any, f.files[0] as any,
+      { start: 'start', end: 'end', label: 'title', dependencies: 'blocked-by', zone: 'UTC' }, f.plugin.history as any, false, () => {}, () => {});
+    modal.open(); modal.contentEl.querySelector('input')!.value = 'invalid draft'; body.scrollTop = 400;
+    assert.equal(f.surface.revealGroup(group), 'busy'); assert.equal(body.scrollTop, 400); modal.close();
+  });
+
+  test(`${kind}: equal lane labels never replace group identity, even after order or render changes`, () => {
+    const f = fixture(kind, true), entries = f.view.data.data;
+    const first = { hasKey: () => true, key: 'Same label', entries: [entries[0]] }, second = { hasKey: () => true, key: 'Same label', entries: [entries[1]] };
+    f.view.data = { data: entries, groupedData: [first, second] }; f.view.onDataUpdated();
+    const handles = f.surface.groups(); assert.equal(handles.length, 2);
+    assert.equal(handles[0].target.group, first); assert.equal(handles[1].target.group, second);
+    assert.equal(f.surface.groupHit(handles[1].element.firstChild!)?.target.group, second);
+    f.view.data.groupedData.reverse(); f.view.onDataUpdated();
+    assert.equal(handles[0].current(), false); assert.equal(f.surface.groups()[0].target.group, second);
+    assert.equal(f.surface.revealGroup({ ...first }), 'unavailable');
+  });
+
+  test(`${kind}: removed source groups invalidate mounted lane handles before the next render`, () => {
+    const f = fixture(kind, true), handle = f.surface.groups()[0], group = handle.target.group;
+    f.view.data.groupedData = [];
+    assert.equal(handle.current(), false); assert.deepEqual(f.surface.groups(), []); assert.equal(f.surface.revealGroup(group), 'unavailable');
+    f.view.onunload(); assert.equal(f.surface.groupHit(handle.element), undefined);
+  });
+
   test(`${kind}: explicit annotation mode captures a badge without invoking schedule handlers`, () => {
 	const f = fixture(kind), received: TimelineHandle[] = []; let stopped = 0, scheduleGestures = 0;
 	const item = f.surface.handles().find((handle: TimelineHandle) => handle.target.type === 'item' && handle.target.file === f.files[0])!;

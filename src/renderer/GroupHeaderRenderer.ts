@@ -7,6 +7,7 @@
 
 import type { SabidurianGroup } from '../model/SabidurianEntry';
 import { GROUP_HEADER_HEIGHT } from '../model/LayoutEngine';
+import type { TimelineGroupHandle } from '../collaboration/CollaborationBridge';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -14,6 +15,7 @@ export class GroupHeaderRenderer {
   private svg: SVGSVGElement;
   private groupHeaderGroup: SVGGElement;
   private onToggle: ((groupName: string) => void) | null = null;
+  private headers = new Map<SabidurianGroup, SVGGElement>();
 
   constructor(svg: SVGSVGElement) {
     this.svg = svg;
@@ -34,6 +36,7 @@ export class GroupHeaderRenderer {
   }
 
   render(groups: SabidurianGroup[], canvasWidth: number): void {
+    this.headers.clear();
     while (this.groupHeaderGroup.firstChild) {
       this.groupHeaderGroup.removeChild(this.groupHeaderGroup.firstChild);
     }
@@ -102,6 +105,25 @@ export class GroupHeaderRenderer {
     });
 
     this.groupHeaderGroup.appendChild(g);
+    this.headers.set(group, g);
+  }
+
+  collaborationGroups(): TimelineGroupHandle[] {
+    if (this.headers.size > 256) return [];
+    const handles: TimelineGroupHandle[] = [];
+    for (const [model, element] of this.headers) {
+      const group = model.source;
+      if (group && element.isConnected) handles.push({ target: { type: 'group', group }, element,
+        current: () => model.source === group && this.headers.get(model) === element && element.isConnected });
+    }
+    return handles;
+  }
+
+  /** Scroll only vertically; do not expand the lane or change its grouping. */
+  revealGroup(group: TimelineGroupHandle['target']['group'], viewport: HTMLElement): boolean {
+    const matches = [...this.headers].filter(([model, element]) => model.source === group && element.isConnected);
+    if (matches.length !== 1 || !viewport.isConnected) return false;
+    viewport.scrollTop = Math.max(0, matches[0][0].headerY - 12); return true;
   }
 
   setToggleCallback(cb: (groupName: string) => void): void {
@@ -112,6 +134,7 @@ export class GroupHeaderRenderer {
   }
 
   destroy(): void {
+    this.headers.clear();
     this.groupHeaderGroup.remove();
   }
 }

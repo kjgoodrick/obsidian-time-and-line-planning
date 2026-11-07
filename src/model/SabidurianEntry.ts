@@ -2,7 +2,7 @@
  * SabidurianEntry — Wraps a BasesEntry with computed timeline layout data.
  */
 
-import type { TFile } from 'obsidian';
+import type { TFile, BasesEntryGroup } from 'obsidian';
 import type { SabidurianDate } from '../utils/dateUtils';
 import type { TaskIcon } from './taskIcons';
 
@@ -61,6 +61,8 @@ export interface SabidurianEntry {
  * SabidurianGroup — A group of entries (from Bases groupBy).
  */
 export interface SabidurianGroup {
+  /** Exact local query group, preserved through sorting; never a durable ID. */
+  source?: BasesEntryGroup;
   /** Group display name (the value of the groupBy property). */
   name: string;
   /** Entries in this group. */

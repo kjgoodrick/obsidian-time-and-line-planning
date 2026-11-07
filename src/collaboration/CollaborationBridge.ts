@@ -1,4 +1,4 @@
-import type { BasesPropertyId, BasesView, EventRef, TFile } from 'obsidian';
+import type { BasesEntryGroup, BasesPropertyId, BasesView, EventRef, TFile } from 'obsidian';
 import { TaskInspector } from '../interaction/TaskInspector';
 
 declare module 'obsidian' {
@@ -19,6 +19,14 @@ export interface TimelineHandle {
   element: SVGElement;
   current(): boolean;
 }
+/** Source objects stay local. The consumer derives typed values and verifies
+ * managed source witnesses; a label or a group key is never an authorization. */
+export interface TimelineGroupHandle {
+  target: { type: 'group'; group: BasesEntryGroup };
+  element: SVGElement;
+  current(): boolean;
+}
+export type TimelineSelectionHandle = TimelineHandle | TimelineGroupHandle;
 export type TimelineReveal = 'revealed' | 'hidden' | 'property-hidden' | 'ambiguous' | 'busy' | 'unavailable';
 export interface TimelineSurfacePort {
   owner: BasesView;
@@ -28,12 +36,14 @@ export interface TimelineSurfacePort {
   hit(node: Node, point?: TimelinePoint): TimelineHandle | undefined;
   selection(): TFile[];
   reveal(target: TimelineTarget): TimelineReveal;
+  groups?(): TimelineGroupHandle[];
+  revealGroup?(group: BasesEntryGroup): TimelineReveal;
 }
 
 /** One lifetime per Bases view, retained across renderer replacement. */
 export class TimelineSurface {
   readonly protocolVersion = 1;
-  readonly capabilities = Object.freeze(['item', 'cell', 'selection', 'geometry', 'reveal', 'annotation'] as const);
+  readonly capabilities = Object.freeze(['item', 'cell', 'selection', 'geometry', 'reveal', 'annotation', 'groups'] as const);
   private listeners = new Set<() => void>();
   private closed = false;
   private serial = 0;
@@ -52,6 +62,21 @@ export class TimelineSurface {
     return Object.freeze({ ...value, current: () => this.current() && this.serial === revision && value.current() });
   }
   handles(): TimelineHandle[] { return this.current() ? this.port.handles().map(handle => this.handle(handle)) : []; }
+  groups(): TimelineGroupHandle[] {
+    if (!this.current()) return [];
+    const revision = this.serial, handles = this.port.groups?.() ?? [];
+    return handles.length <= 256 ? handles.map(handle => ({ ...handle,
+      current: () => this.current() && this.serial === revision && handle.current() })) : [];
+  }
+  groupHit(node: Node): TimelineGroupHandle | undefined {
+    const matches = this.groups().filter(handle => handle.element.contains(node) && handle.current());
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+  revealGroup(group: BasesEntryGroup): TimelineReveal {
+    if (!this.viewport()) return 'unavailable';
+    if (TaskInspector.hasDirty(this.root.ownerDocument)) return 'busy';
+    return this.port.revealGroup?.(group) ?? 'unavailable';
+  }
   hit(node: Node, point?: TimelinePoint): TimelineHandle | undefined {
     if (!this.current()) return;
     const handle = this.port.hit(node, point); return handle ? this.handle(handle) : undefined;
@@ -71,7 +96,7 @@ export class TimelineSurface {
   reveal(target: TimelineTarget): TimelineReveal { return this.viewport() && (target?.type === 'item' || target?.type === 'cell') ? this.port.reveal(target) : 'unavailable'; }
   /** Explicit one-shot selection mode. Touch keeps native pan/zoom; schedule
    * handlers never receive the gesture, compatibility mouse event or key. */
-  beginAnnotation(select: (handle: TimelineHandle) => void, stopped: () => void): (() => void) | undefined {
+  beginAnnotation(select: (handle: TimelineSelectionHandle) => void, stopped: () => void): (() => void) | undefined {
     if (!this.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return;
     this.stopAnnotation?.();
     const cleanup: (() => void)[] = []; let live = true, start: TimelinePoint | undefined, dragged = false;
@@ -99,7 +124,7 @@ export class TimelineSurface {
       event.preventDefault(); event.stopImmediatePropagation();
       const pointer = event as MouseEvent;
       if (dragged || !this.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return;
-      const handle = event.target && this.hit(event.target as Node, pointer);
+      const handle = event.target && (this.groupHit(event.target as Node) ?? this.hit(event.target as Node, pointer));
       if (!handle?.current()) return;
       stop(); select(handle);
     });

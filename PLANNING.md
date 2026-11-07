@@ -44,7 +44,7 @@ Run `npm run test:webkit`, then `npm run test:webkit:simulator` in another termi
 See [TESTING.md](TESTING.md) for validation and remaining native iPhone checks, and [HANDOFF.md](HANDOFF.md) for development setup.
 
 The optional [collaboration bridge](COLLABORATION.md) exposes local record and
-property-badge targets, explicit annotation selection and guarded navigation to
+property-badge targets, exact lane source objects, explicit annotation selection and guarded navigation to
 companion plugins. Team Relay's development consumer connects those targets to
-saved-view comment controls. Native acceptance, lanes/ranges, shared markers and
+saved-view comment controls. Native acceptance, ranges, shared markers and
 presence remain unfinished. It adds no task writes or settings synchronization.

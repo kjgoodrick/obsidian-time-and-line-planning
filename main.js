@@ -837,7 +837,7 @@ var TimelineSurface = class {
   constructor(port) {
     this.port = port;
     this.protocolVersion = 1;
-    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal", "annotation"]);
+    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal", "annotation", "groups"]);
     this.listeners = /* @__PURE__ */ new Set();
     this.closed = false;
     this.serial = 0;
@@ -864,6 +864,25 @@ var TimelineSurface = class {
   }
   handles() {
     return this.current() ? this.port.handles().map((handle) => this.handle(handle)) : [];
+  }
+  groups() {
+    var _a, _b, _c;
+    if (!this.current()) return [];
+    const revision = this.serial, handles = (_c = (_b = (_a = this.port).groups) == null ? void 0 : _b.call(_a)) != null ? _c : [];
+    return handles.length <= 256 ? handles.map((handle) => ({
+      ...handle,
+      current: () => this.current() && this.serial === revision && handle.current()
+    })) : [];
+  }
+  groupHit(node) {
+    const matches = this.groups().filter((handle) => handle.element.contains(node) && handle.current());
+    return matches.length === 1 ? matches[0] : void 0;
+  }
+  revealGroup(group) {
+    var _a, _b, _c;
+    if (!this.viewport()) return "unavailable";
+    if (TaskInspector.hasDirty(this.root.ownerDocument)) return "busy";
+    return (_c = (_b = (_a = this.port).revealGroup) == null ? void 0 : _b.call(_a, group)) != null ? _c : "unavailable";
   }
   hit(node, point) {
     if (!this.current()) return;
@@ -931,11 +950,12 @@ var TimelineSurface = class {
       event.stopImmediatePropagation();
     });
     listen(this.root, "click", (event) => {
+      var _a2;
       event.preventDefault();
       event.stopImmediatePropagation();
       const pointer = event;
       if (dragged || !this.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return;
-      const handle = event.target && this.hit(event.target, pointer);
+      const handle = event.target && ((_a2 = this.groupHit(event.target)) != null ? _a2 : this.hit(event.target, pointer));
       if (!(handle == null ? void 0 : handle.current())) return;
       stop();
       select(handle);
@@ -2247,6 +2267,7 @@ var SVG_NS3 = "http://www.w3.org/2000/svg";
 var GroupHeaderRenderer = class {
   constructor(svg) {
     this.onToggle = null;
+    this.headers = /* @__PURE__ */ new Map();
     this.svg = svg;
     this.groupHeaderGroup = document.createElementNS(SVG_NS3, "g");
     this.groupHeaderGroup.classList.add("sabidurian-group-headers");
@@ -2260,6 +2281,7 @@ var GroupHeaderRenderer = class {
     }
   }
   render(groups, canvasWidth) {
+    this.headers.clear();
     while (this.groupHeaderGroup.firstChild) {
       this.groupHeaderGroup.removeChild(this.groupHeaderGroup.firstChild);
     }
@@ -2320,6 +2342,27 @@ var GroupHeaderRenderer = class {
       }
     });
     this.groupHeaderGroup.appendChild(g);
+    this.headers.set(group, g);
+  }
+  collaborationGroups() {
+    if (this.headers.size > 256) return [];
+    const handles = [];
+    for (const [model, element] of this.headers) {
+      const group = model.source;
+      if (group && element.isConnected) handles.push({
+        target: { type: "group", group },
+        element,
+        current: () => model.source === group && this.headers.get(model) === element && element.isConnected
+      });
+    }
+    return handles;
+  }
+  /** Scroll only vertically; do not expand the lane or change its grouping. */
+  revealGroup(group, viewport) {
+    const matches = [...this.headers].filter(([model, element]) => model.source === group && element.isConnected);
+    if (matches.length !== 1 || !viewport.isConnected) return false;
+    viewport.scrollTop = Math.max(0, matches[0][0].headerY - 12);
+    return true;
   }
   setToggleCallback(cb) {
     this.onToggle = cb;
@@ -2328,6 +2371,7 @@ var GroupHeaderRenderer = class {
     this.groupHeaderGroup.querySelectorAll("text").forEach((el) => el.setAttribute("transform", `translate(${px}, 0)`));
   }
   destroy() {
+    this.headers.clear();
     this.groupHeaderGroup.remove();
   }
 };
@@ -4779,6 +4823,17 @@ var SabidurianView = class extends import_obsidian8.BasesView {
         var _a2;
         return (_a2 = this.barRenderer) == null ? void 0 : _a2.collaborationHit(node, point);
       },
+      groups: () => {
+        var _a2, _b2;
+        return (_b2 = (_a2 = this.groupHeaderRenderer) == null ? void 0 : _a2.collaborationGroups().filter((handle) => this.data.groupedData.includes(handle.target.group)).map((handle) => ({
+          ...handle,
+          current: () => handle.current() && this.data.groupedData.includes(handle.target.group)
+        }))) != null ? _b2 : [];
+      },
+      revealGroup: (group) => {
+        var _a2;
+        return this.timelineRenderer && this.data.groupedData.includes(group) && ((_a2 = this.groupHeaderRenderer) == null ? void 0 : _a2.revealGroup(group, this.timelineRenderer.element)) ? "revealed" : "unavailable";
+      },
       selection: () => {
         var _a2, _b2;
         return (_b2 = (_a2 = this.selectionManager) == null ? void 0 : _a2.getSelectedEntries().map((entry) => entry.file)) != null ? _b2 : [];
@@ -4883,6 +4938,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
         for (const e of parsed) e.groupKey = groupName;
         sabidurianEntries.push(...parsed);
         sabidurianGroups.push({
+          source: group,
           name: groupName,
           entries: parsed,
           collapsed: this.collapsedGroups.has(groupName),
@@ -6563,6 +6619,17 @@ var SequenceView = class extends import_obsidian9.BasesView {
         var _a2;
         return (_a2 = this.barRenderer) == null ? void 0 : _a2.collaborationHit(node, point);
       },
+      groups: () => {
+        var _a2, _b2;
+        return (_b2 = (_a2 = this.groupHeaderRenderer) == null ? void 0 : _a2.collaborationGroups().filter((handle) => this.data.groupedData.includes(handle.target.group)).map((handle) => ({
+          ...handle,
+          current: () => handle.current() && this.data.groupedData.includes(handle.target.group)
+        }))) != null ? _b2 : [];
+      },
+      revealGroup: (group) => {
+        var _a2;
+        return this.timelineRenderer && this.data.groupedData.includes(group) && ((_a2 = this.groupHeaderRenderer) == null ? void 0 : _a2.revealGroup(group, this.timelineRenderer.element)) ? "revealed" : "unavailable";
+      },
       selection: () => {
         var _a2, _b2;
         return (_b2 = (_a2 = this.selectionManager) == null ? void 0 : _a2.getSelectedEntries().map((entry) => entry.file)) != null ? _b2 : [];
@@ -6618,6 +6685,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
         for (const e of parsed) e.groupKey = groupName;
         sabidurianEntries.push(...parsed);
         sabidurianGroups.push({
+          source: group,
           name: groupName,
           entries: parsed,
           collapsed: this.collapsedGroups.has(groupName),

@@ -114,6 +114,9 @@ export class SequenceView extends BasesView {
       viewport: () => this.timelineRenderer?.element,
       handles: () => this.barRenderer?.collaborationHandles() ?? [],
       hit: (node, point) => this.barRenderer?.collaborationHit(node, point),
+      groups: () => this.groupHeaderRenderer?.collaborationGroups().filter(handle => this.data.groupedData.includes(handle.target.group)).map(handle => ({ ...handle,
+        current: () => handle.current() && this.data.groupedData.includes(handle.target.group) })) ?? [],
+      revealGroup: group => this.timelineRenderer && this.data.groupedData.includes(group) && this.groupHeaderRenderer?.revealGroup(group, this.timelineRenderer.element) ? 'revealed' : 'unavailable',
       selection: () => this.selectionManager?.getSelectedEntries().map(entry => entry.file) ?? [],
       reveal: target => this.revealDiscussionTarget(target),
     });
@@ -184,6 +187,7 @@ export class SequenceView extends BasesView {
         for (const e of parsed) e.groupKey = groupName;
         sabidurianEntries.push(...parsed);
         sabidurianGroups.push({
+          source: group,
           name: groupName,
           entries: parsed,
           collapsed: this.collapsedGroups.has(groupName),

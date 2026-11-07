@@ -5,6 +5,8 @@ import { NumericAxis } from '../src/scale/NumericAxis';
 import { parseTimelineRange, timelineRangeKey } from '../src/collaboration/TimelineRange';
 import { axisDescriptor, draftRange, ordinalPixel, projectRange, type RangeState } from '../src/collaboration/RangeProjection';
 import { instantToWallMs, offsetISO } from '../src/utils/timezone';
+import { createRangeFocus, rangeFocusCurrent } from '../src/collaboration/RangeFocus';
+import '../src/scale/scales/index';
 
 const fixtures = JSON.parse(readFileSync('tests/fixtures/timeline-ranges-v1.json', 'utf8'));
 for (const row of fixtures.valid) test(`shared range contract: ${row.name}`, () => {
@@ -33,6 +35,40 @@ test('large adjacent decimal values remain distinct when projected relative to a
   const current = state(true); current.axis = new NumericAxis(999999999999998, 999999999999999, 1000);
   const first = ordinalPixel('999999999999998.000000001', current), second = ordinalPixel('999999999999998.000000002', current);
   assert.ok(Math.abs(first - 0.000001) < 1e-15); assert.ok(Math.abs(second - 0.000002) < 1e-15); assert.ok(second > first);
+});
+
+test('temporary focus keeps exact adjacent ordinals and uses bounded original-value ticks', () => {
+  const current = state(true); current.denseValues = [1, 2];
+  const range = row('adjacent exact large ordinal values'), axis = axisDescriptor(current)!;
+  const focus = createRangeFocus(range, current, axis);
+  assert.deepEqual(focus.range, parseTimelineRange(range));
+  const projected = projectRange(range, { ...current, denseValues: null, axis: new NumericAxis(focus.viewStart, focus.viewEnd, 800) }, axis);
+  assert.ok(projected.end > projected.start); assert.ok(projected.start >= 0 && projected.end <= 800);
+  const columns = focus.scale.getColumnBoundaries(focus.viewStart, focus.viewEnd);
+  assert.ok(columns.length > 0 && columns.length <= 64); assert.ok(columns.at(-1)!.end >= focus.viewEnd);
+  assert.ok(rangeFocusCurrent(focus, current.config, current.renderer, null));
+  assert.equal(rangeFocusCurrent(focus, { ...current.config }, current.renderer, null), false);
+});
+
+test('historical focus covers billion-year intervals without Date overflow or enumerating every year', () => {
+  const current = state(), axis = axisDescriptor(current)!;
+  for (const [start, end] of [[-1000000000, 1000000000], [1000000000, 1000000000], [-1000000000, -1000000000]]) {
+    const range = { version: 1, kind: 'historical', start: { precision: 'year', year: start }, end: { precision: 'year', year: end },
+      start_inclusive: true, end_inclusive: true, calendar: 'proleptic-gregorian', year_numbering: 'astronomical' };
+    const focus = createRangeFocus(parseTimelineRange(range), current, axis), columns = focus.scale.getColumnBoundaries(focus.viewStart, focus.viewEnd);
+    assert.ok(columns.length > 0 && columns.length <= 64); assert.ok(columns[0].start <= focus.viewStart && columns.at(-1)!.end >= focus.viewEnd);
+    const projected = projectRange(range, { ...current, axis: new NumericAxis(focus.viewStart, focus.viewEnd, 800) }, axis);
+    assert.ok(projected.start >= 0 && projected.end <= 800 && projected.end > projected.start);
+  }
+});
+
+test('focus preserves civil-time discontinuity and rejects stale axes and timezones', () => {
+  const current = state(false, 'America/Denver'), axis = axisDescriptor(current)!;
+  const range = row('DST repeated wall time'), focus = createRangeFocus(range, current, axis);
+  const projected = projectRange(range, { ...current, axis: new NumericAxis(focus.viewStart, focus.viewEnd, 800) }, axis);
+  assert.equal(projected.start, projected.end); assert.equal(projected.discontinuous, true);
+  assert.equal(rangeFocusCurrent(focus, current.config, current.renderer, 'UTC'), false);
+  assert.throws(() => createRangeFocus(range, current, { ...axis, start_property: { source: 'note', name: 'other' } }));
 });
 
 test('dense Sequence ranges use original property values and bounded interpolation', () => {

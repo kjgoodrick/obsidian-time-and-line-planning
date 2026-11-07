@@ -11,7 +11,7 @@ npm ci
 npm run package
 ```
 
-Packaging runs TypeScript checking, the 210-test regression suite, the production build, and creation of a deterministic plugin-only ZIP. The DOM suites use Happy DOM and a small Obsidian API fixture; they do not execute the native Obsidian app. The optional [collaboration bridge](COLLABORATION.md) checks include explicit annotation, exact lane identity, dirty-inspector navigation, range coordinate projection and mouse/touch/keyboard range selection. Team Relay's source interoperability fixture exercises both real view types and load orders with and without grouping, including range selection/projection/navigation; native acceptance, the range comment interface and remaining timeline targets are pending.
+Packaging runs TypeScript checking, the 223-test regression suite, the production build, and creation of a deterministic plugin-only ZIP. The DOM suites use Happy DOM and a small Obsidian API fixture; they do not execute the native Obsidian app. The optional [collaboration bridge](COLLABORATION.md) checks include explicit annotation, exact lane identity, dirty-inspector navigation, range coordinate projection and mouse/touch/keyboard range selection. Team Relay's source interoperability fixture exercises both real view types and load orders with and without grouping, including range confirmation, exact lane markers and temporary navigation outside the data-derived axis. Native acceptance and remaining timeline targets are pending.
 
 Coverage includes:
 
@@ -23,6 +23,10 @@ Coverage includes:
 - Compact hover cards and rich custom-image edge tooltips with a 100 ms delay, no duplicate tooltip, and native dismissal conventions.
 - Drag/two-click measurement with at most two nonzero units down to seconds, reverse drags, release outside the SVG, cancellation, and no schedule writes.
 - Synthetic touch-derived mouse events cannot reschedule tasks.
+- Temporary comment-range focus and return preserve saved settings, task data,
+  collapsed lanes, original viewport and dense Sequence layout. Tests cover
+  changed axes, dirty inspectors, pending scroll callbacks, exact large decimals
+  and bounded grids for billion-year historical intervals.
 
 ## Prior native desktop validation
 

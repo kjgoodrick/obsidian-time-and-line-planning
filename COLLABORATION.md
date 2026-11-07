@@ -5,7 +5,7 @@ The planning fork exposes a versioned local integration bridge for
 targeting, selection, visible geometry, guarded navigation, explicit annotation
 selection and lifecycle notifications. Team Relay's development consumer connects
 these to its saved-view comment controls. It does **not** yet provide the complete
-timeline comment feature: the range composer/decorations, shared calendar markers, presence and native
+timeline comment feature: shared calendar markers, presence and native
 desktop/mobile acceptance remain. Lane headers now expose exact query group
 objects; the consumer derives typed targets with its existing authorization.
 
@@ -111,10 +111,27 @@ use a UTC serialization when a minute offset would change the instant.
 
 Geometry returns viewport coordinates and a lifetime check, with an optional
 exact query group for a lane band. The consumer owns markers and clipping.
-`revealRange` scrolls the existing axis and preserves settings; a range outside
-that rendered domain returns `hidden`. It does not yet expand the axis for
-navigation. The bridge itself has no range-comment toolbar or confirmation
-dialog, saved comment decorations, persistence, presence or shared milestones.
+`revealRange` scrolls the existing axis when it covers the interval. Otherwise it
+opens a temporary **Viewing comment range** viewport, with **Return to data**
+restoring the original position. Dates, order, filters, collapse, locks and saved
+settings stay unchanged. A second range retains the original return point.
+Ordinary data refreshes preserve focus; axis/property/timezone or host-config
+replacement clears it. Dirty inspector input blocks both navigation and return.
+Pending animation-frame restoration cannot undo explicit range/item navigation.
+
+Dense Sequence temporarily displays original property values when a range cannot
+be projected into its occupied positions; it restores dense layout on return.
+Exact decimal targets remain unchanged. Historical domains outside JavaScript
+Date and very large spans use a bounded numeric grid; focus never enumerates the
+gap to the data. Focused canvases are bounded and off-axis task bars are culled.
+Lane reveal validates the exact source group before changing the viewport and
+preserves its collapsed state. Rebuilding the viewport invalidates previously
+captured geometry and selection contexts; consumers must reacquire them.
+
+An empty/invalid query without a live axis still returns unavailable; it cannot
+navigate a detached old renderer. The companion consumer owns the range comment
+form, saved decorations and persistence. Presence and shared milestones remain
+unfinished.
 
 ## Navigation safety
 
@@ -154,7 +171,7 @@ keyboard accessibility and native host acceptance remain release gates.
 
 ## Verification and remaining work
 
-`npm run package` passes 210 synthetic regressions, TypeScript checking, production
+`npm run package` passes 223 synthetic regressions, TypeScript checking, production
 build and deterministic plugin-only packaging. The bridge cases use the real
 Timeline/Sequence views and renderers with the existing Happy DOM host adapter.
 They cover item/badge identity, aliases, re-render/rename, coordinate hit testing,
@@ -167,7 +184,9 @@ code against a synthetic Obsidian host, covering both view types and load orders
 including typed lane source capture and range selection/projection/navigation.
 Range regressions additionally cover the shared coordinate corpus, exact decimal
 projection, dense values, DST ambiguity, CE/BCE boundary conversion, mouse/touch/
-keyboard selection and no scheduling writes. Separate actual-service checks cover group
+keyboard selection, distant range focus/return, exact collapsed lanes, dense
+Sequence restoration, bounded billion-year scales, stale axes, inspector drafts,
+delayed viewport callbacks and no scheduling writes. Separate actual-service checks cover group
 authorization and offline recovery in both saved-view types; these do not replace
 the native interaction matrix.
 

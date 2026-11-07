@@ -1760,6 +1760,9 @@ body.theme-dark {
 }
 .sabidurian-range-selection-status:focus-visible { outline: 2px solid var(--interactive-accent); }
 .sabidurian-range-selection-status [role="status"] { display: block; }
+.sabidurian-comment-range-focus { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+.sabidurian-comment-range-focus > span:first-child { max-width: min(40vw, 32rem); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sabidurian-comment-range-focus > span { color: var(--text-muted); }
 .sabidurian-comment-range-selection line {
   stroke: var(--interactive-accent);
   stroke-width: 2;

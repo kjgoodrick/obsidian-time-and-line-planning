@@ -4,6 +4,9 @@ import { iconLabel, resolveTaskIcon } from './model/taskIcons';
 import { TaskInspector, TaskPicker, NewTaskModal, type TaskFields } from './interaction/TaskInspector';
 import { axisToWallMs, wallToInstant, offsetISO, instantToWallMs, wallMsToAxis } from './utils/timezone';
 import { TimelineSurface, type TimelineTarget, type TimelineReveal } from './collaboration/CollaborationBridge';
+import type { RangeAxis, RangeState } from './collaboration/RangeProjection';
+import type { TimelineRange } from './collaboration/TimelineRange';
+import { createRangeFocus, rangeFocusCurrent, renderRangeFocus, type RangeFocus } from './collaboration/RangeFocus';
 import { BasesView, Notice, QueryController, setIcon } from 'obsidian';
 import type { BasesPropertyId, TFile } from 'obsidian';
 import type SabidurianPlugin from './main';
@@ -105,6 +108,8 @@ export class SabidurianView extends BasesView {
   private _hasRendered = false;
   private pendingViewport: { year: number; top: number } | null = null;
   private restoreFrame: number | null = null;
+  private rangeFocus?: RangeFocus;
+  private rangeReturn?: { year: number; top: number };
 
   // ── Viewport culling (Phase 11) ──
   private viewportCuller: ViewportCuller | null = null;
@@ -135,8 +140,9 @@ export class SabidurianView extends BasesView {
       revealGroup: group => this.timelineRenderer && this.data.groupedData.includes(group) && this.groupHeaderRenderer?.revealGroup(group, this.timelineRenderer.element) ? 'revealed' : 'unavailable',
       selection: () => this.selectionManager?.getSelectedEntries().map(entry => entry.file) ?? [],
       reveal: target => this.revealDiscussionTarget(target),
-      ranges: () => this.timelineRenderer && this.currentEntries.length ? { axis: this.axis, config: this.config, renderer: 'sabidurian-timeline',
-        svg: this.timelineRenderer.svgElement, viewport: this.timelineRenderer.element, timeZone: this.timeZone } : undefined,
+      ranges: () => this.rangeState(),
+      focusRange: (range, axis) => this.focusDiscussionRange(range, axis),
+      rangeScrolled: () => this.finishRangeNavigation(),
     });
     this.releaseCollaboration = plugin.collaboration?.register(this.collaboration);
     plugin.colorSubscribers?.add(this.refreshColors);
@@ -145,6 +151,9 @@ export class SabidurianView extends BasesView {
   }
 
   onDataUpdated(): void {
+    const changedFocus = !!this.rangeFocus && !rangeFocusCurrent(this.rangeFocus, this.config, 'sabidurian-timeline',
+      String(this.config.get('timeZone') || Intl.DateTimeFormat().resolvedOptions().timeZone));
+    if (changedFocus) { this.rangeFocus = undefined; this.rangeReturn = undefined; this.pendingViewport = null; this.lockUpdateState = null; }
     // Saving a view option also notifies Bases. Keep a lock-only notification
     // in place, but never swallow a coalesced data, grouping or display change.
     if (this.lockUpdateState && !this.pendingViewport && this.rootEl?.isConnected && this.timelineRenderer) {
@@ -158,7 +167,7 @@ export class SabidurianView extends BasesView {
     this.lockUpdateState = null;
     this.barRenderer?.invalidateCollaboration(); this.collaboration.changed();
     // Preserve scroll position across re-renders
-    const previous = this.pendingViewport ?? (this.timelineRenderer ? {
+    const previous = changedFocus ? null : this.pendingViewport ?? (this.timelineRenderer ? {
       year: this.axis.pixelToYear(this.timelineRenderer.element.scrollLeft),
       top: this.timelineRenderer.element.scrollTop,
     } : null);
@@ -299,22 +308,23 @@ export class SabidurianView extends BasesView {
     // already or within one "data range" of it, to avoid huge empty gaps on
     // historical Bases.
     const initialScroll = (this.config.get('initialScroll') as string | undefined) ?? 'today';
-    const { viewStart, viewEnd, range } = this.computeViewBounds(
+    const dataBounds = this.computeViewBounds(
       sabidurianEntries,
       initialScroll === 'today',
     );
+    const { viewStart, viewEnd, range } = this.rangeFocus ? { ...this.rangeFocus, range: this.rangeFocus.viewEnd - this.rangeFocus.viewStart } : dataBounds;
 
     // Auto-select scale first (based on range), then compute canvas width.
     // Legacy 'hour' scale has been folded into 'day'.
     const containerWidth = this.rootEl.clientWidth || 800;
     let savedScaleId = this.config.get('scaleId') as string | undefined;
     if (savedScaleId === 'hour') savedScaleId = 'day';
-    this.currentScale = (savedScaleId && savedScaleId !== 'auto')
+    this.currentScale = this.rangeFocus?.scale ?? ((savedScaleId && savedScaleId !== 'auto')
       ? (SCALES.find(s => s.id === savedScaleId) ?? autoSelectScale(range, containerWidth))
-      : autoSelectScale(range, containerWidth);
+      : autoSelectScale(range, containerWidth));
 
     // Generate columns for the selected scale (needed before canvas width calc)
-    const columns = this.currentScale.getColumnBoundaries(viewStart, viewEnd, Number(this.config.get('tickMinutes') || 15));
+    const columns = this.currentScale.getColumnBoundaries(viewStart, viewEnd, this.rangeFocus ? undefined : Number(this.config.get('tickMinutes') || 15));
 
     // Canvas width: ensure each column gets at least ~Npx so switching
     // scales always produces a visible difference in bar sizing. Capped at
@@ -323,7 +333,7 @@ export class SabidurianView extends BasesView {
     const MAX_CANVAS_WIDTH = 32000;
     const minColPx = this.currentScale.minColumnPx ?? 80;
     const densityWidth = Math.min(MAX_CANVAS_WIDTH, columns.length * minColPx);
-    const canvasWidth = Math.max(containerWidth, densityWidth);
+    const canvasWidth = Math.max(containerWidth, this.rangeFocus ? Math.min(3200, densityWidth) : densityWidth);
     this.axis.setView(this.currentScale.id === 'month' && columns.length ? columns[0].start : viewStart, this.currentScale.id === 'month' && columns.length ? columns[columns.length - 1].end : viewEnd, canvasWidth);
     // Lock state: per-view config OR auto-lock on mobile via plugin setting
     const configLocked = this.config.get('locked') as boolean | undefined;
@@ -426,7 +436,7 @@ export class SabidurianView extends BasesView {
     this._showArrows = this.config.get('showArrows') as boolean ?? true;
     this._isGrouped = isGrouped;
     this.allVisibleEntries = visibleEntries;
-    this.cullingActive = visibleEntries.length > CULLING_THRESHOLD;
+    this.cullingActive = !!this.rangeFocus || visibleEntries.length > CULLING_THRESHOLD;
     this.lastViewportBounds = null;
     this.viewportCuller = new ViewportCuller((row) => this.layoutEngine.getRowY(row));
 
@@ -826,11 +836,46 @@ export class SabidurianView extends BasesView {
     this.collaboration.changed();
   }
 
+  private rangeState(): RangeState | undefined {
+    return this.timelineRenderer && this.currentEntries.length ? { axis: this.axis, config: this.config, renderer: 'sabidurian-timeline',
+      svg: this.timelineRenderer.svgElement, viewport: this.timelineRenderer.element, timeZone: this.timeZone } : undefined;
+  }
+
+  private focusDiscussionRange(range: TimelineRange, axis: RangeAxis): boolean {
+    if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) return false;
+    const state = this.rangeState(); if (!state) return false;
+    const focus = createRangeFocus(range, state, axis), top = state.viewport.scrollTop;
+    this.rangeReturn ??= { year: this.axis.pixelToYear(state.viewport.scrollLeft), top };
+    this.rangeFocus = focus; this.lockUpdateState = null;
+    this.pendingViewport = { year: focus.viewStart, top };
+    this.onDataUpdated();
+    if (!this.timelineRenderer || this.rangeFocus !== focus) return false;
+    this.timelineRenderer.element.scrollTop = top; return true;
+  }
+
+  private restoreRangeView(): void {
+    if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) { new Notice('Save or discard the task inspector changes before returning to data.'); return; }
+    this.pendingViewport = this.rangeReturn ?? null; this.rangeFocus = undefined; this.rangeReturn = undefined; this.lockUpdateState = null;
+    this.onDataUpdated();
+    this.rootEl?.querySelector<HTMLSelectElement>('.sabidurian-scale-select')?.focus({ preventScroll: true });
+  }
+
+  private finishRangeNavigation(): void {
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
+    this.restoreFrame = null; this.pendingViewport = null;
+    const body = this.timelineRenderer?.element; if (!body) return;
+    this.headerRenderer?.setScrollLeft(body.scrollLeft); this.groupHeaderRenderer?.setScrollLeft(body.scrollLeft);
+    if (this.sideTableRenderer) this.sideTableRenderer.scrollBody.scrollTop = body.scrollTop;
+    this.lastViewportBounds = null; if (this.cullingActive) this.renderVisibleBars();
+    this.taskEdges?.refresh();
+  }
+
   private revealDiscussionTarget(target: TimelineTarget): TimelineReveal {
     if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) return 'busy';
     const matches = this.currentEntries.filter(entry => entry.file === target.file);
     if (matches.length > 1) return 'ambiguous';
     const entry = matches[0]; if (!entry || !this.timelineRenderer) return 'unavailable';
+    if (this.rangeFocus) { this.restoreRangeView(); return this.revealDiscussionTarget(target); }
     if (entry.row < 0) return 'hidden';
     if (target.type === 'cell' && (!this.plugin.settings.showBarProperties || !['barDisplayProp1', 'barDisplayProp2', 'barDisplayProp3'].some(key => this.config.get(key) === target.property))) return 'property-hidden';
     this.timelineRenderer.element.scrollTop = Math.max(0, this.layoutEngine.getRowY(entry.row) - 12);
@@ -1182,6 +1227,10 @@ export class SabidurianView extends BasesView {
   }
 
   private revealTask(file: TFile): void {
+    if (this.rangeFocus) {
+      if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) { new Notice('Save or discard the task inspector changes before navigating.'); return; }
+      this.restoreRangeView();
+    }
     let entry = this.currentEntries.find(e => e.file.path === file.path);
     if (!entry) { void this.plugin.app.workspace.getLeaf(false).openFile(file); return; }
     if (entry.row < 0 && entry.groupKey) {
@@ -1193,6 +1242,12 @@ export class SabidurianView extends BasesView {
   }
 
   private jumpToTaskBoundary(entry: SabidurianEntry, boundary: TaskBoundary): void {
+    if (this.rangeFocus) {
+      if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) { new Notice('Save or discard the task inspector changes before navigating.'); return; }
+      this.restoreRangeView();
+      const current = this.currentEntries.find(candidate => candidate.file === entry.file); if (!current) return;
+      return this.jumpToTaskBoundary(current, boundary);
+    }
     if (!this.timelineRenderer) return;
     const body = this.timelineRenderer.element;
     if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
@@ -1260,6 +1315,7 @@ export class SabidurianView extends BasesView {
     if (!this.rootEl) return;
 
     const controlsEl = this.rootEl.createDiv({ cls: 'sabidurian-controls' });
+    if (this.rangeFocus) renderRangeFocus(controlsEl, this.rangeFocus, () => this.restoreRangeView());
 
     // Entry count
     controlsEl.createEl('span', {
@@ -1285,6 +1341,8 @@ export class SabidurianView extends BasesView {
     // Scale selector
     const scaleControl = controlsEl.createSpan({ cls: 'sabidurian-scale-control' });
     const scaleSelect = scaleControl.createEl('select', { cls: 'sabidurian-scale-select' });
+    if (this.rangeFocus?.scale.id === 'comment-range') scaleSelect.createEl('option', { value: 'comment-range', text: this.rangeFocus.scale.label });
+    scaleSelect.disabled = !!this.rangeFocus;
     for (const scale of SCALES) {
       const opt = scaleSelect.createEl('option', { value: scale.id, text: scale.label });
       if (this.currentScale && scale.id === this.currentScale.id) {

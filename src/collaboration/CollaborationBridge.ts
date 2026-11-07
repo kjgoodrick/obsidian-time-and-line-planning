@@ -1,6 +1,6 @@
 import type { BasesEntryGroup, BasesPropertyId, BasesView, EventRef, TFile } from 'obsidian';
 import { TaskInspector } from '../interaction/TaskInspector';
-import { projectRange, rangeContext, type RangeAxis, type RangeContext, type RangeKind, type RangeSelection, type RangeState } from './RangeProjection';
+import { projectRange, rangeContext, rangeExtent, type RangeAxis, type RangeContext, type RangeKind, type RangeSelection, type RangeState } from './RangeProjection';
 import { beginRangeInteraction } from './RangeInteraction';
 import type { HistoricalPoint, TimelineRange } from './TimelineRange';
 
@@ -42,6 +42,9 @@ export interface TimelineSurfacePort {
   groups?(): TimelineGroupHandle[];
   revealGroup?(group: BasesEntryGroup): TimelineReveal;
   ranges?(): RangeState | undefined;
+  /** Rebuild a temporary local axis; never modify saved view or task data. */
+  focusRange?(range: TimelineRange, axis: RangeAxis): boolean;
+  rangeScrolled?(): void;
 }
 
 export interface TimelineRangeGeometry {
@@ -123,12 +126,25 @@ export class TimelineSurface {
   revealRange(range: TimelineRange, axis: RangeAxis, group?: BasesEntryGroup): TimelineReveal {
     if (TaskInspector.hasDirty(this.root.ownerDocument)) return 'busy';
     try {
-      const context = this.rangeContext(), state = this.port.ranges?.(); if (!context || !state) return 'unavailable';
-      const projected = projectRange(range, state, axis), start = Math.min(projected.start, projected.end), end = Math.max(projected.start, projected.end);
-      if (end < 0 || start > state.axis.totalWidth) return 'hidden';
+      let context = this.rangeContext(), state = this.port.ranges?.(); if (!context || !state) return 'unavailable';
+      // Validate semantic inputs even when dense projection has no such position.
+      rangeExtent(range, state, axis);
+      if (group) {
+        const lanes = this.groups().filter(handle => handle.current() && handle.target.group === group);
+        if (lanes.length !== 1) return lanes.length ? 'ambiguous' : 'unavailable';
+      }
+      let projected;
+      try { projected = projectRange(range, state, axis); } catch { /* Dense values may not cover this interval. */ }
+      if (!projected || Math.min(projected.start, projected.end) < 0 || Math.max(projected.start, projected.end) > state.axis.totalWidth) {
+        if (!this.port.focusRange?.(range, axis)) return 'hidden';
+        context = this.rangeContext(); state = this.port.ranges?.(); if (!context || !state) return 'unavailable';
+        projected = projectRange(range, state, axis);
+      }
+      const start = Math.min(projected.start, projected.end);
       if (group) { const result = this.revealGroup(group); if (result !== 'revealed') return result; }
       if (!context.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return 'busy';
       state.viewport.scrollLeft = Math.max(0, Math.min(start - Math.min(48, state.viewport.clientWidth / 4), Math.max(0, state.viewport.scrollWidth - state.viewport.clientWidth)));
+      this.port.rangeScrolled?.();
       this.changed(); return 'revealed';
     } catch { return 'unavailable'; }
   }

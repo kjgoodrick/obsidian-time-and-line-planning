@@ -39,7 +39,7 @@ function property(value: unknown): Property | null {
   const name = match ? match[2] : value;
   return name.length <= 256 ? { source: match ? match[1] as Property['source'] : 'note', name } : null;
 }
-export function axisDescriptor(state: RangeState): RangeAxis | undefined {
+export function axisDescriptor(state: Pick<RangeState, 'config' | 'renderer'>): RangeAxis | undefined {
   const sequence = state.renderer === 'sabidurian-sequence';
   const start = property(state.config.get(sequence ? 'orderProp' : 'startDateProp'));
   const rawEnd = state.config.get(sequence ? 'orderEndProp' : 'endDateProp');
@@ -107,15 +107,22 @@ export function ordinalPixel(value: string, state: Pick<RangeState, 'axis' | 'de
   if (end <= start) throw new Error('Sequence precision is unavailable.');
   return Number(target - start) / Number(end - start) * state.axis.totalWidth;
 }
-export function projectRange(input: unknown, state: RangeState, expected: RangeAxis): ProjectedRange {
+function checkedRange(input: unknown, state: RangeState, expected: RangeAxis): TimelineRange {
   const range = parseTimelineRange(input), descriptor = axisDescriptor(state);
   if (!descriptor || axisKey(descriptor) !== axisKey(expected) || (state.renderer === 'sabidurian-sequence') !== (range.kind === 'ordinal')) throw new Error('The timeline axis changed.');
-  if (range.kind === 'ordinal') return { start: ordinalPixel(range.start, state), end: ordinalPixel(range.end, state), discontinuous: false };
   const zone = state.timeZone ?? descriptor.time_zone;
   if ('time_zone' in range && descriptor.time_zone !== null && range.time_zone !== descriptor.time_zone) throw new Error('The range uses a different timezone.');
   if (range.kind === 'calendar' && range.time_zone !== zone) throw new Error('The calendar range uses a different timezone.');
+  return range;
+}
+/** Semantic axis coordinates for choosing a temporary viewport. Ordinal values
+ * here only choose representable outer bounds; projection retains exact decimals. */
+export function rangeExtent(input: unknown, state: RangeState, expected: RangeAxis): ProjectedRange {
+  const range = checkedRange(input, state, expected);
+  if (range.kind === 'ordinal') return { start: Number(range.start), end: Number(range.end), discontinuous: false };
   let start: number, end: number, discontinuous = false;
   if (range.kind === 'instant') {
+    const zone = state.timeZone ?? axisDescriptor(state)?.time_zone;
     validateTimelineTimeZone(zone);
     const a = Date.parse(range.start), b = Date.parse(range.end), wallA = instantToWallMs(a, zone!), wallB = instantToWallMs(b, zone!);
     start = wallMsToAxis(wallA); end = wallMsToAxis(wallB);
@@ -127,7 +134,13 @@ export function projectRange(input: unknown, state: RangeState, expected: RangeA
     const b = range.kind === 'historical' ? historicalPeriod(range.end) : calendarPeriod(range.end);
     start = a[range.start_inclusive ? 0 : 1]; end = b[range.end_inclusive ? 1 : 0];
   }
-  const output = { start: state.axis.yearToPixel(start), end: state.axis.yearToPixel(end), discontinuous };
+  return { start, end, discontinuous };
+}
+export function projectRange(input: unknown, state: RangeState, expected: RangeAxis): ProjectedRange {
+  const range = checkedRange(input, state, expected);
+  if (range.kind === 'ordinal') return { start: ordinalPixel(range.start, state), end: ordinalPixel(range.end, state), discontinuous: false };
+  const extent = rangeExtent(range, state, expected);
+  const output = { start: state.axis.yearToPixel(extent.start), end: state.axis.yearToPixel(extent.end), discontinuous: extent.discontinuous };
   if (![output.start, output.end].every(Number.isFinite)) throw new Error('Range geometry is unavailable.');
   return output;
 }

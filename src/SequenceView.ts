@@ -40,6 +40,9 @@ import { ViewportCuller, type ViewportBounds } from './model/ViewportCuller';
 import { confirmAction } from './utils/confirmModal';
 import { TimelineSurface, type TimelineTarget, type TimelineReveal } from './collaboration/CollaborationBridge';
 import { TaskInspector } from './interaction/TaskInspector';
+import type { RangeAxis, RangeState } from './collaboration/RangeProjection';
+import type { TimelineRange } from './collaboration/TimelineRange';
+import { createRangeFocus, rangeFocusCurrent, renderRangeFocus, type RangeFocus } from './collaboration/RangeFocus';
 
 const VIEW_PADDING = 0.5; // Half-step padding on each side
 const MIN_TIMELINE_HEIGHT = 200;
@@ -104,6 +107,10 @@ export class SequenceView extends BasesView {
   private _orderEndPropName: string | null = null;
   /** In dense mode, maps dense index (0-based) → original order value. Null when sparse. */
   private _denseToSparse: number[] | null = null;
+  private rangeFocus?: RangeFocus;
+  private rangeReturn?: { left: number; top: number };
+  private pendingViewport?: { left: number; top: number };
+  private restoreFrame: number | null = null;
   private refreshColors = () => this.onDataUpdated();
 
   constructor(controller: QueryController, scrollEl: HTMLElement, plugin: SabidurianPlugin) {
@@ -119,8 +126,9 @@ export class SequenceView extends BasesView {
       revealGroup: group => this.timelineRenderer && this.data.groupedData.includes(group) && this.groupHeaderRenderer?.revealGroup(group, this.timelineRenderer.element) ? 'revealed' : 'unavailable',
       selection: () => this.selectionManager?.getSelectedEntries().map(entry => entry.file) ?? [],
       reveal: target => this.revealDiscussionTarget(target),
-      ranges: () => this.timelineRenderer && this.currentEntries.length ? { axis: this.axis, config: this.config, renderer: 'sabidurian-sequence',
-        svg: this.timelineRenderer.svgElement, viewport: this.timelineRenderer.element, denseValues: this._denseToSparse } : undefined,
+      ranges: () => this.rangeState(),
+      focusRange: (range, axis) => this.focusDiscussionRange(range, axis),
+      rangeScrolled: () => this.finishRangeNavigation(),
     });
     this.releaseCollaboration = plugin.collaboration?.register(this.collaboration);
     plugin.colorSubscribers?.add(this.refreshColors);
@@ -128,9 +136,14 @@ export class SequenceView extends BasesView {
   }
 
   onDataUpdated(): void {
+    const changedFocus = !!this.rangeFocus && !rangeFocusCurrent(this.rangeFocus, this.config, 'sabidurian-sequence', null);
+    if (changedFocus) { this.rangeFocus = undefined; this.rangeReturn = undefined; this.pendingViewport = { left: 0, top: 0 }; }
     this.barRenderer?.invalidateCollaboration(); this.collaboration.changed();
-    const prevScrollLeft = this.timelineRenderer?.element.scrollLeft ?? 0;
-    const prevScrollTop = this.timelineRenderer?.element.scrollTop ?? 0;
+    const prevScrollLeft = this.pendingViewport?.left ?? this.timelineRenderer?.element.scrollLeft ?? 0;
+    const prevScrollTop = this.pendingViewport?.top ?? this.timelineRenderer?.element.scrollTop ?? 0;
+    this.pendingViewport = undefined;
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
+    this.restoreFrame = null;
 
     // Clean up
     this.destroyManagers();
@@ -153,7 +166,7 @@ export class SequenceView extends BasesView {
     const colorPropId = this.config.getAsPropertyId('colorProp');
     const depPropRaw = this.config.get('dependencyProp') as string | undefined;
     const depPropName = depPropRaw?.trim() || this.plugin.settings.dependencyProperty || 'blocked-by';
-    const denseMode = this.config.get('denseMode') as boolean ?? false;
+    const denseMode = !this.rangeFocus && (this.config.get('denseMode') as boolean ?? false);
 
     // Store raw frontmatter keys for write-back.
     // Bases property IDs are prefixed with "note." — strip it for frontmatter access.
@@ -222,7 +235,7 @@ export class SequenceView extends BasesView {
 
     // Collect ALL occupied integer positions (including span interiors)
     const allOccupied = new Set<number>();
-    for (const e of sabidurianEntries) {
+    for (const e of this.rangeFocus ? [] : sabidurianEntries) {
       for (let p = Math.floor(e.startYear); p < e.endYear; p++) {
         allOccupied.add(p);
       }
@@ -234,7 +247,9 @@ export class SequenceView extends BasesView {
     let stepCount: number;
     this._denseToSparse = null;
 
-    if (denseMode && sortedOccupied.length > 0) {
+    if (this.rangeFocus) {
+      viewStart = this.rangeFocus.viewStart; viewEnd = this.rangeFocus.viewEnd; stepCount = 8;
+    } else if (denseMode && sortedOccupied.length > 0) {
       // Build sparse → dense mapping
       const sparseToDense = new Map<number, number>();
       for (let i = 0; i < sortedOccupied.length; i++) {
@@ -267,7 +282,7 @@ export class SequenceView extends BasesView {
     }
 
     // Create sequence scale (pass original positions for column labels)
-    this.currentScale = createSequenceScale(sortedOccupied, denseMode);
+    this.currentScale = this.rangeFocus?.scale ?? createSequenceScale(sortedOccupied, denseMode);
 
     // Canvas width: each step gets STEP_WIDTH_PX
     const containerWidth = this.rootEl.clientWidth || 800;
@@ -362,7 +377,7 @@ export class SequenceView extends BasesView {
     this._showArrows = this.config.get('showArrows') as boolean ?? true;
     this._isGrouped = isGrouped;
     this.allVisibleEntries = visibleEntries;
-    this.cullingActive = visibleEntries.length > CULLING_THRESHOLD;
+    this.cullingActive = !!this.rangeFocus || visibleEntries.length > CULLING_THRESHOLD;
     this.lastViewportBounds = null;
     this.viewportCuller = new ViewportCuller((row) => this.layoutEngine.getRowY(row));
 
@@ -434,7 +449,8 @@ export class SequenceView extends BasesView {
 
     // Restore scroll position
     if (prevScrollLeft || prevScrollTop) {
-      requestAnimationFrame(() => {
+      this.restoreFrame = requestAnimationFrame(() => {
+        if (this.timelineRenderer?.element !== timelineBody) return;
         timelineBody.scrollLeft = prevScrollLeft;
         timelineBody.scrollTop = prevScrollTop;
         this.headerRenderer?.setScrollLeft(prevScrollLeft);
@@ -444,6 +460,7 @@ export class SequenceView extends BasesView {
         if (this.cullingActive) {
           this.renderVisibleBars();
         }
+        this.restoreFrame = null;
       });
     }
   }
@@ -667,18 +684,50 @@ export class SequenceView extends BasesView {
     this.collaboration.changed();
   }
 
+  private rangeState(): RangeState | undefined {
+    return this.timelineRenderer && this.currentEntries.length ? { axis: this.axis, config: this.config, renderer: 'sabidurian-sequence',
+      svg: this.timelineRenderer.svgElement, viewport: this.timelineRenderer.element, denseValues: this._denseToSparse } : undefined;
+  }
+
+  private focusDiscussionRange(range: TimelineRange, axis: RangeAxis): boolean {
+    if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) return false;
+    const state = this.rangeState(); if (!state) return false;
+    const focus = createRangeFocus(range, state, axis), top = state.viewport.scrollTop;
+    this.rangeReturn ??= { left: state.viewport.scrollLeft, top };
+    this.rangeFocus = focus; this.pendingViewport = { left: 0, top };
+    this.onDataUpdated();
+    if (!this.timelineRenderer || this.rangeFocus !== focus) return false;
+    this.timelineRenderer.element.scrollTop = top; return true;
+  }
+
+  private restoreRangeView(): void {
+    if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) { new Notice('Save or discard the task inspector changes before returning to data.'); return; }
+    this.pendingViewport = this.rangeReturn; this.rangeFocus = undefined; this.rangeReturn = undefined;
+    this.onDataUpdated();
+    this.rootEl?.querySelector<HTMLButtonElement>('.sabidurian-dense-btn')?.focus({ preventScroll: true });
+  }
+
+  private finishRangeNavigation(): void {
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
+    this.restoreFrame = null;
+    const body = this.timelineRenderer?.element; if (!body) return;
+    this.headerRenderer?.setScrollLeft(body.scrollLeft); this.groupHeaderRenderer?.setScrollLeft(body.scrollLeft);
+    if (this.sideTableRenderer) this.sideTableRenderer.scrollBody.scrollTop = body.scrollTop;
+    this.lastViewportBounds = null; if (this.cullingActive) this.renderVisibleBars();
+  }
+
   private revealDiscussionTarget(target: TimelineTarget): TimelineReveal {
     if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) return 'busy';
     const matches = this.currentEntries.filter(entry => entry.file === target.file);
     if (matches.length > 1) return 'ambiguous';
     const entry = matches[0], body = this.timelineRenderer?.element;
     if (!entry || !body) return 'unavailable';
+    if (this.rangeFocus) { this.restoreRangeView(); return this.revealDiscussionTarget(target); }
     if (entry.row < 0) return 'hidden';
     if (target.type === 'cell' && (!this.plugin.settings.showBarProperties || !['barDisplayProp1', 'barDisplayProp2', 'barDisplayProp3'].some(key => this.config.get(key) === target.property))) return 'property-hidden';
     body.scrollLeft = Math.max(0, entry.x - Math.min(48, body.clientWidth / 4));
     body.scrollTop = Math.max(0, this.layoutEngine.getRowY(entry.row) - 12);
-    this.headerRenderer?.setScrollLeft(body.scrollLeft); this.groupHeaderRenderer?.setScrollLeft(body.scrollLeft);
-    this.lastViewportBounds = null; if (this.cullingActive) this.renderVisibleBars();
+    this.finishRangeNavigation();
     if (target.type === 'cell' && !this.barRenderer?.collaborationHandles().some(handle => handle.target.type === 'cell' && handle.target.file === target.file && handle.target.property === target.property)) return 'property-hidden';
     this.collaboration.changed(); return 'revealed';
   }
@@ -880,6 +929,7 @@ export class SequenceView extends BasesView {
   private renderControls(entryCount: number): void {
     if (!this.rootEl) return;
     const controlsEl = this.rootEl.createDiv({ cls: 'sabidurian-controls' });
+    if (this.rangeFocus) renderRangeFocus(controlsEl, this.rangeFocus, () => this.restoreRangeView());
 
     controlsEl.createEl('span', {
       cls: 'sabidurian-controls-info',
@@ -917,6 +967,7 @@ export class SequenceView extends BasesView {
       cls: `sabidurian-today-btn sabidurian-dense-btn${denseMode ? ' sabidurian-dense-active' : ''}`,
       text: denseMode ? 'Sparse' : 'Dense',
     });
+    denseBtn.disabled = !!this.rangeFocus;
     denseBtn.addEventListener('click', () => {
       this.config.set('denseMode', !denseMode);
       this.onDataUpdated();
@@ -974,6 +1025,7 @@ export class SequenceView extends BasesView {
   }
 
   onunload(): void {
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
     this.releaseCollaboration?.(); this.collaboration.dispose();
     this.plugin.colorSubscribers?.delete(this.refreshColors);
     this.destroyManagers();

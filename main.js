@@ -1057,16 +1057,22 @@ function ordinalPixel(value, state) {
   if (end <= start) throw new Error("Sequence precision is unavailable.");
   return Number(target - start) / Number(end - start) * state.axis.totalWidth;
 }
-function projectRange(input, state, expected) {
+function checkedRange(input, state, expected) {
   var _a;
   const range = parseTimelineRange(input), descriptor = axisDescriptor(state);
   if (!descriptor || axisKey(descriptor) !== axisKey(expected) || state.renderer === "sabidurian-sequence" !== (range.kind === "ordinal")) throw new Error("The timeline axis changed.");
-  if (range.kind === "ordinal") return { start: ordinalPixel(range.start, state), end: ordinalPixel(range.end, state), discontinuous: false };
   const zone = (_a = state.timeZone) != null ? _a : descriptor.time_zone;
   if ("time_zone" in range && descriptor.time_zone !== null && range.time_zone !== descriptor.time_zone) throw new Error("The range uses a different timezone.");
   if (range.kind === "calendar" && range.time_zone !== zone) throw new Error("The calendar range uses a different timezone.");
+  return range;
+}
+function rangeExtent(input, state, expected) {
+  var _a, _b;
+  const range = checkedRange(input, state, expected);
+  if (range.kind === "ordinal") return { start: Number(range.start), end: Number(range.end), discontinuous: false };
   let start, end, discontinuous = false;
   if (range.kind === "instant") {
+    const zone = (_b = state.timeZone) != null ? _b : (_a = axisDescriptor(state)) == null ? void 0 : _a.time_zone;
     validateTimelineTimeZone(zone);
     const a = Date.parse(range.start), b = Date.parse(range.end), wallA = instantToWallMs(a, zone), wallB = instantToWallMs(b, zone);
     start = wallMsToAxis(wallA);
@@ -1078,7 +1084,13 @@ function projectRange(input, state, expected) {
     start = a[range.start_inclusive ? 0 : 1];
     end = b[range.end_inclusive ? 1 : 0];
   }
-  const output = { start: state.axis.yearToPixel(start), end: state.axis.yearToPixel(end), discontinuous };
+  return { start, end, discontinuous };
+}
+function projectRange(input, state, expected) {
+  const range = checkedRange(input, state, expected);
+  if (range.kind === "ordinal") return { start: ordinalPixel(range.start, state), end: ordinalPixel(range.end, state), discontinuous: false };
+  const extent = rangeExtent(range, state, expected);
+  const output = { start: state.axis.yearToPixel(extent.start), end: state.axis.yearToPixel(extent.end), discontinuous: extent.discontinuous };
   if (![output.start, output.end].every(Number.isFinite)) throw new Error("Range geometry is unavailable.");
   return output;
 }
@@ -1450,19 +1462,36 @@ var TimelineSurface = class {
     }
   }
   revealRange(range, axis, group) {
-    var _a, _b;
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     if (TaskInspector.hasDirty(this.root.ownerDocument)) return "busy";
     try {
-      const context = this.rangeContext(), state = (_b = (_a = this.port).ranges) == null ? void 0 : _b.call(_a);
+      let context = this.rangeContext(), state = (_b = (_a = this.port).ranges) == null ? void 0 : _b.call(_a);
       if (!context || !state) return "unavailable";
-      const projected = projectRange(range, state, axis), start = Math.min(projected.start, projected.end), end = Math.max(projected.start, projected.end);
-      if (end < 0 || start > state.axis.totalWidth) return "hidden";
+      rangeExtent(range, state, axis);
+      if (group) {
+        const lanes = this.groups().filter((handle) => handle.current() && handle.target.group === group);
+        if (lanes.length !== 1) return lanes.length ? "ambiguous" : "unavailable";
+      }
+      let projected;
+      try {
+        projected = projectRange(range, state, axis);
+      } catch (e) {
+      }
+      if (!projected || Math.min(projected.start, projected.end) < 0 || Math.max(projected.start, projected.end) > state.axis.totalWidth) {
+        if (!((_d = (_c = this.port).focusRange) == null ? void 0 : _d.call(_c, range, axis))) return "hidden";
+        context = this.rangeContext();
+        state = (_f = (_e = this.port).ranges) == null ? void 0 : _f.call(_e);
+        if (!context || !state) return "unavailable";
+        projected = projectRange(range, state, axis);
+      }
+      const start = Math.min(projected.start, projected.end);
       if (group) {
         const result = this.revealGroup(group);
         if (result !== "revealed") return result;
       }
       if (!context.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return "busy";
       state.viewport.scrollLeft = Math.max(0, Math.min(start - Math.min(48, state.viewport.clientWidth / 4), Math.max(0, state.viewport.scrollWidth - state.viewport.clientWidth)));
+      (_h = (_g = this.port).rangeScrolled) == null ? void 0 : _h.call(_g);
       this.changed();
       return "revealed";
     } catch (e) {
@@ -1666,6 +1695,77 @@ var CollaborationBridge = class {
   }
 };
 
+// src/scale/TimeScale.ts
+var SCALES = [];
+function registerScale(scale2) {
+  SCALES.push(scale2);
+  SCALES.sort((a, b) => a.unitDurationYears - b.unitDurationYears);
+}
+function autoSelectScale(yearRange, pixelWidth) {
+  const targetColumnPx = 100;
+  const targetColumns = Math.max(1, pixelWidth / targetColumnPx);
+  const targetUnitYears = yearRange / targetColumns;
+  let best = SCALES[0];
+  let bestDist = Infinity;
+  for (const scale2 of SCALES) {
+    const dist = Math.abs(Math.log(scale2.unitDurationYears) - Math.log(targetUnitYears));
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = scale2;
+    }
+  }
+  return best;
+}
+
+// src/collaboration/RangeFocus.ts
+function numericScale(start, end, sequence) {
+  const desired = Math.max((end - start) / 8, sequence ? 1e-9 : 1);
+  const power = 10 ** Math.floor(Math.log10(desired));
+  const step = [1, 2, 5, 10].find((value) => value * power >= desired) * power;
+  return {
+    id: "comment-range",
+    label: sequence ? "Sequence values" : "Years",
+    unitDurationYears: step,
+    supportsSubYear: false,
+    supportsBCE: !sequence,
+    writePrecision: sequence ? void 0 : "year",
+    getColumnBoundaries(from, to) {
+      const columns = [], first = Math.floor(from / step);
+      for (let i = 0; i < 64; i++) {
+        const a = (first + i) * step, b = (first + i + 1) * step;
+        if (a > to) break;
+        if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) break;
+        columns.push({ start: a, end: b, label: sequence ? String(Number(a.toFixed(9))) : formatYear(Math.round(a)) });
+      }
+      return columns;
+    },
+    snapToUnit: (value) => sequence ? Math.round(value) : Math.round(value / step) * step
+  };
+}
+function createRangeFocus(input, state, expected) {
+  var _a;
+  const range = parseTimelineRange(input), extent = rangeExtent(range, state, expected);
+  const low = Math.min(extent.start, extent.end), high = Math.max(extent.start, extent.end);
+  const sequence = range.kind === "ordinal", beyondDate = low < -27e4 || high > 27e4;
+  const minimum = sequence ? 0.5 : beyondDate ? 1 : 1 / (366 * 24);
+  const padding = Math.max((high - low) * 0.1, minimum, Math.max(Math.abs(low), Math.abs(high)) * Number.EPSILON * 8);
+  const viewStart = low - padding, viewEnd = high + padding;
+  if (![viewStart, viewEnd].every(Number.isFinite) || viewEnd <= viewStart) throw new Error("The range cannot be displayed.");
+  const scale2 = sequence || beyondDate || viewEnd - viewStart > 1e4 ? numericScale(viewStart, viewEnd, sequence) : autoSelectScale(viewEnd - viewStart, 800);
+  return { config: state.config, axis: axisDescriptor(state), zone: (_a = state.timeZone) != null ? _a : null, range, viewStart, viewEnd, scale: scale2 };
+}
+function rangeFocusCurrent(focus, config, renderer, zone) {
+  const axis = axisDescriptor({ config, renderer });
+  return focus.config === config && !!axis && axisKey(axis) === axisKey(focus.axis) && focus.zone === zone;
+}
+function renderRangeFocus(parent, focus, restore) {
+  const group = parent.createDiv({ cls: "sabidurian-comment-range-focus", attr: { role: "group", "aria-label": "Comment range navigation" } });
+  group.createSpan({ text: "Viewing comment range \xB7 " + timelineRangeLabel(focus.range) });
+  if (focus.range.kind === "ordinal") group.createSpan({ text: "Original property values" });
+  const button = group.createEl("button", { text: "Return to data", attr: { type: "button" } });
+  button.onclick = restore;
+}
+
 // src/SabidurianView.ts
 var import_obsidian8 = require("obsidian");
 
@@ -1701,28 +1801,6 @@ var NumericAxis = class {
     this.totalWidth = width;
   }
 };
-
-// src/scale/TimeScale.ts
-var SCALES = [];
-function registerScale(scale2) {
-  SCALES.push(scale2);
-  SCALES.sort((a, b) => a.unitDurationYears - b.unitDurationYears);
-}
-function autoSelectScale(yearRange, pixelWidth) {
-  const targetColumnPx = 100;
-  const targetColumns = Math.max(1, pixelWidth / targetColumnPx);
-  const targetUnitYears = yearRange / targetColumns;
-  let best = SCALES[0];
-  let bestDist = Infinity;
-  for (const scale2 of SCALES) {
-    const dist = Math.abs(Math.log(scale2.unitDurationYears) - Math.log(targetUnitYears));
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = scale2;
-    }
-  }
-  return best;
-}
 
 // src/renderer/HeaderRenderer.ts
 var HeaderRenderer = class {
@@ -5438,21 +5516,28 @@ var SabidurianView = class extends import_obsidian8.BasesView {
         return (_b2 = (_a2 = this.selectionManager) == null ? void 0 : _a2.getSelectedEntries().map((entry) => entry.file)) != null ? _b2 : [];
       },
       reveal: (target) => this.revealDiscussionTarget(target),
-      ranges: () => this.timelineRenderer && this.currentEntries.length ? {
-        axis: this.axis,
-        config: this.config,
-        renderer: "sabidurian-timeline",
-        svg: this.timelineRenderer.svgElement,
-        viewport: this.timelineRenderer.element,
-        timeZone: this.timeZone
-      } : void 0
+      ranges: () => this.rangeState(),
+      focusRange: (range, axis) => this.focusDiscussionRange(range, axis),
+      rangeScrolled: () => this.finishRangeNavigation()
     });
     this.releaseCollaboration = (_a = plugin.collaboration) == null ? void 0 : _a.register(this.collaboration);
     (_b = plugin.colorSubscribers) == null ? void 0 : _b.add(this.refreshColors);
     this.renderSkeleton();
   }
   onDataUpdated() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C, _D;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C, _D, _E, _F;
+    const changedFocus = !!this.rangeFocus && !rangeFocusCurrent(
+      this.rangeFocus,
+      this.config,
+      "sabidurian-timeline",
+      String(this.config.get("timeZone") || Intl.DateTimeFormat().resolvedOptions().timeZone)
+    );
+    if (changedFocus) {
+      this.rangeFocus = void 0;
+      this.rangeReturn = void 0;
+      this.pendingViewport = null;
+      this.lockUpdateState = null;
+    }
     if (this.lockUpdateState && !this.pendingViewport && ((_a = this.rootEl) == null ? void 0 : _a.isConnected) && this.timelineRenderer) {
       const next = this.captureLockUpdateState();
       if (next === this.lockUpdateState) {
@@ -5464,7 +5549,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     this.lockUpdateState = null;
     (_b = this.barRenderer) == null ? void 0 : _b.invalidateCollaboration();
     this.collaboration.changed();
-    const previous = (_c = this.pendingViewport) != null ? _c : this.timelineRenderer ? {
+    const previous = changedFocus ? null : (_c = this.pendingViewport) != null ? _c : this.timelineRenderer ? {
       year: this.axis.pixelToYear(this.timelineRenderer.element.scrollLeft),
       top: this.timelineRenderer.element.scrollTop
     } : null;
@@ -5578,19 +5663,20 @@ var SabidurianView = class extends import_obsidian8.BasesView {
       );
     }
     const initialScroll = (_v = this.config.get("initialScroll")) != null ? _v : "today";
-    const { viewStart, viewEnd, range } = this.computeViewBounds(
+    const dataBounds = this.computeViewBounds(
       sabidurianEntries,
       initialScroll === "today"
     );
+    const { viewStart, viewEnd, range } = this.rangeFocus ? { ...this.rangeFocus, range: this.rangeFocus.viewEnd - this.rangeFocus.viewStart } : dataBounds;
     const containerWidth = this.rootEl.clientWidth || 800;
     let savedScaleId = this.config.get("scaleId");
     if (savedScaleId === "hour") savedScaleId = "day";
-    this.currentScale = savedScaleId && savedScaleId !== "auto" ? (_w = SCALES.find((s) => s.id === savedScaleId)) != null ? _w : autoSelectScale(range, containerWidth) : autoSelectScale(range, containerWidth);
-    const columns = this.currentScale.getColumnBoundaries(viewStart, viewEnd, Number(this.config.get("tickMinutes") || 15));
+    this.currentScale = (_y = (_w = this.rangeFocus) == null ? void 0 : _w.scale) != null ? _y : savedScaleId && savedScaleId !== "auto" ? (_x = SCALES.find((s) => s.id === savedScaleId)) != null ? _x : autoSelectScale(range, containerWidth) : autoSelectScale(range, containerWidth);
+    const columns = this.currentScale.getColumnBoundaries(viewStart, viewEnd, this.rangeFocus ? void 0 : Number(this.config.get("tickMinutes") || 15));
     const MAX_CANVAS_WIDTH = 32e3;
-    const minColPx = (_x = this.currentScale.minColumnPx) != null ? _x : 80;
+    const minColPx = (_z = this.currentScale.minColumnPx) != null ? _z : 80;
     const densityWidth = Math.min(MAX_CANVAS_WIDTH, columns.length * minColPx);
-    const canvasWidth = Math.max(containerWidth, densityWidth);
+    const canvasWidth = Math.max(containerWidth, this.rangeFocus ? Math.min(3200, densityWidth) : densityWidth);
     this.axis.setView(this.currentScale.id === "month" && columns.length ? columns[0].start : viewStart, this.currentScale.id === "month" && columns.length ? columns[columns.length - 1].end : viewEnd, canvasWidth);
     const configLocked = this.config.get("locked");
     const autoLock = this.plugin.settings.lockOnMobile && isTouchDevice();
@@ -5599,7 +5685,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     const bodyContainerEl = this.rootEl.createDiv({ cls: "sabidurian-body-container" });
     const headerContainerEl = bodyContainerEl.createDiv({ cls: "sabidurian-header-container" });
     const isMobile = isMobileViewport();
-    const showTable = isMobile ? false : (_y = this.config.get("showTable")) != null ? _y : true;
+    const showTable = isMobile ? false : (_A = this.config.get("showTable")) != null ? _A : true;
     const savedTableWidth = this.config.get("tableWidth");
     const tableColumns = this.getTableColumns(startPropId, endPropId);
     if (showTable) {
@@ -5628,7 +5714,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
         this.plugin.app,
         savedTableWidth
       );
-      this.sideTableRenderer.propertyColors = (_z = this.plugin.settings.propertyColors) != null ? _z : {};
+      this.sideTableRenderer.propertyColors = (_B = this.plugin.settings.propertyColors) != null ? _B : {};
       if (isGrouped) {
         this.sideTableRenderer.renderGrouped(
           sabidurianGroups,
@@ -5655,13 +5741,13 @@ var SabidurianView = class extends import_obsidian8.BasesView {
         this.highlightBar(idx);
       });
     }
-    const showToday = (_A = this.config.get("showToday")) != null ? _A : true;
+    const showToday = (_C = this.config.get("showToday")) != null ? _C : true;
     this.timelineRenderer = new TimelineRenderer(contentEl);
     this.timelineRenderer.render(columns, this.axis, canvasHeight, showToday);
-    this._showArrows = (_B = this.config.get("showArrows")) != null ? _B : true;
+    this._showArrows = (_D = this.config.get("showArrows")) != null ? _D : true;
     this._isGrouped = isGrouped;
     this.allVisibleEntries = visibleEntries;
-    this.cullingActive = visibleEntries.length > CULLING_THRESHOLD;
+    this.cullingActive = !!this.rangeFocus || visibleEntries.length > CULLING_THRESHOLD;
     this.lastViewportBounds = null;
     this.viewportCuller = new ViewportCuller((row) => this.layoutEngine.getRowY(row));
     this.barRenderer = new BarRenderer(
@@ -5670,7 +5756,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
       this.rootEl
     );
     this.barRenderer.setAxis(this.axis);
-    this.barRenderer.propertyColors = (_C = this.plugin.settings.propertyColors) != null ? _C : {};
+    this.barRenderer.propertyColors = (_E = this.plugin.settings.propertyColors) != null ? _E : {};
     this.barRenderer.inspect = (entry) => this.inspectTask(entry);
     this.barRenderer.setDatePropNames(this._startPropName, this._endPropName);
     const barDisplayProps = [];
@@ -5685,7 +5771,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
       this.plugin.settings.barPropertyMinWidth,
       this.plugin.settings.showBarProperties
     );
-    const focusTagRaw = ((_D = this.config.get("focusTag")) == null ? void 0 : _D.trim()) || null;
+    const focusTagRaw = ((_F = this.config.get("focusTag")) == null ? void 0 : _F.trim()) || null;
     this.barRenderer.setFocusTag(focusTagRaw ? focusTagRaw.replace(/^#/, "") : null);
     if (isGrouped) {
       this.groupHeaderRenderer = new GroupHeaderRenderer(
@@ -6007,6 +6093,58 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     this.timelineRenderer.raiseTodayMarker();
     this.collaboration.changed();
   }
+  rangeState() {
+    return this.timelineRenderer && this.currentEntries.length ? {
+      axis: this.axis,
+      config: this.config,
+      renderer: "sabidurian-timeline",
+      svg: this.timelineRenderer.svgElement,
+      viewport: this.timelineRenderer.element,
+      timeZone: this.timeZone
+    } : void 0;
+  }
+  focusDiscussionRange(range, axis) {
+    var _a;
+    if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) return false;
+    const state = this.rangeState();
+    if (!state) return false;
+    const focus = createRangeFocus(range, state, axis), top = state.viewport.scrollTop;
+    (_a = this.rangeReturn) != null ? _a : this.rangeReturn = { year: this.axis.pixelToYear(state.viewport.scrollLeft), top };
+    this.rangeFocus = focus;
+    this.lockUpdateState = null;
+    this.pendingViewport = { year: focus.viewStart, top };
+    this.onDataUpdated();
+    if (!this.timelineRenderer || this.rangeFocus !== focus) return false;
+    this.timelineRenderer.element.scrollTop = top;
+    return true;
+  }
+  restoreRangeView() {
+    var _a, _b, _c;
+    if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) {
+      new import_obsidian8.Notice("Save or discard the task inspector changes before returning to data.");
+      return;
+    }
+    this.pendingViewport = (_a = this.rangeReturn) != null ? _a : null;
+    this.rangeFocus = void 0;
+    this.rangeReturn = void 0;
+    this.lockUpdateState = null;
+    this.onDataUpdated();
+    (_c = (_b = this.rootEl) == null ? void 0 : _b.querySelector(".sabidurian-scale-select")) == null ? void 0 : _c.focus({ preventScroll: true });
+  }
+  finishRangeNavigation() {
+    var _a, _b, _c, _d;
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
+    this.restoreFrame = null;
+    this.pendingViewport = null;
+    const body = (_a = this.timelineRenderer) == null ? void 0 : _a.element;
+    if (!body) return;
+    (_b = this.headerRenderer) == null ? void 0 : _b.setScrollLeft(body.scrollLeft);
+    (_c = this.groupHeaderRenderer) == null ? void 0 : _c.setScrollLeft(body.scrollLeft);
+    if (this.sideTableRenderer) this.sideTableRenderer.scrollBody.scrollTop = body.scrollTop;
+    this.lastViewportBounds = null;
+    if (this.cullingActive) this.renderVisibleBars();
+    (_d = this.taskEdges) == null ? void 0 : _d.refresh();
+  }
   revealDiscussionTarget(target) {
     var _a;
     if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) return "busy";
@@ -6014,6 +6152,10 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     if (matches.length > 1) return "ambiguous";
     const entry = matches[0];
     if (!entry || !this.timelineRenderer) return "unavailable";
+    if (this.rangeFocus) {
+      this.restoreRangeView();
+      return this.revealDiscussionTarget(target);
+    }
     if (entry.row < 0) return "hidden";
     if (target.type === "cell" && (!this.plugin.settings.showBarProperties || !["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"].some((key) => this.config.get(key) === target.property))) return "property-hidden";
     this.timelineRenderer.element.scrollTop = Math.max(0, this.layoutEngine.getRowY(entry.row) - 12);
@@ -6302,6 +6444,13 @@ var SabidurianView = class extends import_obsidian8.BasesView {
   }
   revealTask(file) {
     var _a;
+    if (this.rangeFocus) {
+      if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) {
+        new import_obsidian8.Notice("Save or discard the task inspector changes before navigating.");
+        return;
+      }
+      this.restoreRangeView();
+    }
     let entry = this.currentEntries.find((e) => e.file.path === file.path);
     if (!entry) {
       void this.plugin.app.workspace.getLeaf(false).openFile(file);
@@ -6319,6 +6468,16 @@ var SabidurianView = class extends import_obsidian8.BasesView {
   }
   jumpToTaskBoundary(entry, boundary) {
     var _a, _b, _c;
+    if (this.rangeFocus) {
+      if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) {
+        new import_obsidian8.Notice("Save or discard the task inspector changes before navigating.");
+        return;
+      }
+      this.restoreRangeView();
+      const current = this.currentEntries.find((candidate) => candidate.file === entry.file);
+      if (!current) return;
+      return this.jumpToTaskBoundary(current, boundary);
+    }
     if (!this.timelineRenderer) return;
     const body = this.timelineRenderer.element;
     if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
@@ -6396,9 +6555,10 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     }).open();
   }
   renderControls(entryCount) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     if (!this.rootEl) return;
     const controlsEl = this.rootEl.createDiv({ cls: "sabidurian-controls" });
+    if (this.rangeFocus) renderRangeFocus(controlsEl, this.rangeFocus, () => this.restoreRangeView());
     controlsEl.createEl("span", {
       cls: "sabidurian-controls-info",
       text: `${entryCount} entries`
@@ -6431,6 +6591,8 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     }
     const scaleControl = controlsEl.createSpan({ cls: "sabidurian-scale-control" });
     const scaleSelect = scaleControl.createEl("select", { cls: "sabidurian-scale-select" });
+    if (((_a = this.rangeFocus) == null ? void 0 : _a.scale.id) === "comment-range") scaleSelect.createEl("option", { value: "comment-range", text: this.rangeFocus.scale.label });
+    scaleSelect.disabled = !!this.rangeFocus;
     for (const scale2 of SCALES) {
       const opt = scaleSelect.createEl("option", { value: scale2.id, text: scale2.label });
       if (this.currentScale && scale2.id === this.currentScale.id) {
@@ -6442,7 +6604,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
       this.onDataUpdated();
     });
     scaleSelect.setAttribute("aria-label", "Timeline scale");
-    scaleSelect.style.width = `calc(${(_b = (_a = this.currentScale) == null ? void 0 : _a.label.length) != null ? _b : 5}ch + 42px)`;
+    scaleSelect.style.width = `calc(${(_c = (_b = this.currentScale) == null ? void 0 : _b.label.length) != null ? _c : 5}ch + 42px)`;
     const todayBtn = controlsEl.createEl("button", {
       cls: "sabidurian-today-btn",
       text: "Today"
@@ -6450,7 +6612,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     todayBtn.addEventListener("click", () => {
       this.scrollToToday();
     });
-    const showTableConfig = (_c = this.config.get("showTable")) != null ? _c : true;
+    const showTableConfig = (_d = this.config.get("showTable")) != null ? _d : true;
     const tableBtn = controlsEl.createEl("button", {
       cls: "sabidurian-today-btn sabidurian-table-toggle-btn",
       text: showTableConfig ? "Hide Table" : "Show Table"
@@ -6459,7 +6621,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
       this.config.set("showTable", !showTableConfig);
       this.onDataUpdated();
     });
-    const showArrows = (_d = this.config.get("showArrows")) != null ? _d : true;
+    const showArrows = (_e = this.config.get("showArrows")) != null ? _e : true;
     const arrowsBtn = controlsEl.createEl("button", {
       cls: "sabidurian-today-btn sabidurian-arrows-toggle-btn",
       text: showArrows ? "Hide Arrows" : "Show Arrows"
@@ -7208,6 +7370,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
     this._orderEndPropName = null;
     /** In dense mode, maps dense index (0-based) → original order value. Null when sparse. */
     this._denseToSparse = null;
+    this.restoreFrame = null;
     this.refreshColors = () => this.onDataUpdated();
     this.scrollEl = scrollEl;
     this.plugin = plugin;
@@ -7242,30 +7405,34 @@ var SequenceView = class extends import_obsidian9.BasesView {
         return (_b2 = (_a2 = this.selectionManager) == null ? void 0 : _a2.getSelectedEntries().map((entry) => entry.file)) != null ? _b2 : [];
       },
       reveal: (target) => this.revealDiscussionTarget(target),
-      ranges: () => this.timelineRenderer && this.currentEntries.length ? {
-        axis: this.axis,
-        config: this.config,
-        renderer: "sabidurian-sequence",
-        svg: this.timelineRenderer.svgElement,
-        viewport: this.timelineRenderer.element,
-        denseValues: this._denseToSparse
-      } : void 0
+      ranges: () => this.rangeState(),
+      focusRange: (range, axis) => this.focusDiscussionRange(range, axis),
+      rangeScrolled: () => this.finishRangeNavigation()
     });
     this.releaseCollaboration = (_a = plugin.collaboration) == null ? void 0 : _a.register(this.collaboration);
     (_b = plugin.colorSubscribers) == null ? void 0 : _b.add(this.refreshColors);
     this.renderSkeleton();
   }
   onDataUpdated() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v;
+    const changedFocus = !!this.rangeFocus && !rangeFocusCurrent(this.rangeFocus, this.config, "sabidurian-sequence", null);
+    if (changedFocus) {
+      this.rangeFocus = void 0;
+      this.rangeReturn = void 0;
+      this.pendingViewport = { left: 0, top: 0 };
+    }
     (_a = this.barRenderer) == null ? void 0 : _a.invalidateCollaboration();
     this.collaboration.changed();
-    const prevScrollLeft = (_c = (_b = this.timelineRenderer) == null ? void 0 : _b.element.scrollLeft) != null ? _c : 0;
-    const prevScrollTop = (_e = (_d = this.timelineRenderer) == null ? void 0 : _d.element.scrollTop) != null ? _e : 0;
+    const prevScrollLeft = (_e = (_d = (_b = this.pendingViewport) == null ? void 0 : _b.left) != null ? _d : (_c = this.timelineRenderer) == null ? void 0 : _c.element.scrollLeft) != null ? _e : 0;
+    const prevScrollTop = (_i = (_h = (_f = this.pendingViewport) == null ? void 0 : _f.top) != null ? _h : (_g = this.timelineRenderer) == null ? void 0 : _g.element.scrollTop) != null ? _i : 0;
+    this.pendingViewport = void 0;
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
+    this.restoreFrame = null;
     this.destroyManagers();
     if (this.rootEl) this.rootEl.remove();
     this.scrollEl.querySelectorAll(":scope > .sabidurian-container").forEach((el) => el.remove());
     this.rootEl = this.scrollEl.createDiv({ cls: "sabidurian-container sabidurian-sequence-container" });
-    const entries = (_g = (_f = this.data) == null ? void 0 : _f.data) != null ? _g : [];
+    const entries = (_k = (_j = this.data) == null ? void 0 : _j.data) != null ? _k : [];
     if (entries.length === 0) {
       this.renderEmptyState();
       return;
@@ -7275,10 +7442,10 @@ var SequenceView = class extends import_obsidian9.BasesView {
     const colorPropId = this.config.getAsPropertyId("colorProp");
     const depPropRaw = this.config.get("dependencyProp");
     const depPropName = (depPropRaw == null ? void 0 : depPropRaw.trim()) || this.plugin.settings.dependencyProperty || "blocked-by";
-    const denseMode = (_h = this.config.get("denseMode")) != null ? _h : false;
+    const denseMode = !this.rangeFocus && ((_l = this.config.get("denseMode")) != null ? _l : false);
     this._orderPropName = orderPropId ? orderPropId.replace(/^note\./, "") : "order";
     this._orderEndPropName = orderEndPropId ? orderEndPropId.replace(/^note\./, "") : null;
-    const groupedData = (_j = (_i = this.data) == null ? void 0 : _i.groupedData) != null ? _j : [];
+    const groupedData = (_n = (_m = this.data) == null ? void 0 : _m.groupedData) != null ? _n : [];
     const isGrouped = groupedData.length > 1 || groupedData.length === 1 && groupedData[0].hasKey();
     const savedCollapsed = this.config.get("collapsedGroups");
     if (savedCollapsed) this.collapsedGroups = new Set(savedCollapsed);
@@ -7331,7 +7498,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
       );
     }
     const allOccupied = /* @__PURE__ */ new Set();
-    for (const e of sabidurianEntries) {
+    for (const e of this.rangeFocus ? [] : sabidurianEntries) {
       for (let p = Math.floor(e.startYear); p < e.endYear; p++) {
         allOccupied.add(p);
       }
@@ -7341,7 +7508,11 @@ var SequenceView = class extends import_obsidian9.BasesView {
     let viewEnd;
     let stepCount;
     this._denseToSparse = null;
-    if (denseMode && sortedOccupied.length > 0) {
+    if (this.rangeFocus) {
+      viewStart = this.rangeFocus.viewStart;
+      viewEnd = this.rangeFocus.viewEnd;
+      stepCount = 8;
+    } else if (denseMode && sortedOccupied.length > 0) {
       const sparseToDense = /* @__PURE__ */ new Map();
       for (let i = 0; i < sortedOccupied.length; i++) {
         sparseToDense.set(sortedOccupied[i], i + 1);
@@ -7368,11 +7539,11 @@ var SequenceView = class extends import_obsidian9.BasesView {
       viewEnd = maxPos + VIEW_PADDING;
       stepCount = Math.ceil(viewEnd - viewStart);
     }
-    this.currentScale = createSequenceScale(sortedOccupied, denseMode);
+    this.currentScale = (_p = (_o = this.rangeFocus) == null ? void 0 : _o.scale) != null ? _p : createSequenceScale(sortedOccupied, denseMode);
     const containerWidth = this.rootEl.clientWidth || 800;
     const canvasWidth = Math.max(containerWidth, stepCount * STEP_WIDTH_PX);
     this.axis.setView(viewStart, viewEnd, canvasWidth);
-    const configLocked = (_k = this.config.get("locked")) != null ? _k : false;
+    const configLocked = (_q = this.config.get("locked")) != null ? _q : false;
     const autoLock = this.plugin.settings.lockOnMobile && isTouchDevice();
     this._locked = configLocked || autoLock;
     this.renderControls(sabidurianEntries.length);
@@ -7380,7 +7551,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
     const bodyContainerEl = this.rootEl.createDiv({ cls: "sabidurian-body-container" });
     const headerContainerEl = bodyContainerEl.createDiv({ cls: "sabidurian-header-container" });
     const isMobile = isMobileViewport();
-    const showTable = isMobile ? false : (_l = this.config.get("showTable")) != null ? _l : true;
+    const showTable = isMobile ? false : (_r = this.config.get("showTable")) != null ? _r : true;
     const savedTableWidth = this.config.get("tableWidth");
     const tableColumns = this.getTableColumns(orderPropId, orderEndPropId);
     if (showTable) {
@@ -7409,7 +7580,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
         this.plugin.app,
         savedTableWidth
       );
-      this.sideTableRenderer.propertyColors = (_m = this.plugin.settings.propertyColors) != null ? _m : {};
+      this.sideTableRenderer.propertyColors = (_s = this.plugin.settings.propertyColors) != null ? _s : {};
       if (isGrouped) {
         this.sideTableRenderer.renderGrouped(
           sabidurianGroups,
@@ -7438,10 +7609,10 @@ var SequenceView = class extends import_obsidian9.BasesView {
     }
     this.timelineRenderer = new TimelineRenderer(contentEl);
     this.timelineRenderer.render(columns, this.axis, canvasHeight, false);
-    this._showArrows = (_n = this.config.get("showArrows")) != null ? _n : true;
+    this._showArrows = (_t = this.config.get("showArrows")) != null ? _t : true;
     this._isGrouped = isGrouped;
     this.allVisibleEntries = visibleEntries;
-    this.cullingActive = visibleEntries.length > CULLING_THRESHOLD2;
+    this.cullingActive = !!this.rangeFocus || visibleEntries.length > CULLING_THRESHOLD2;
     this.lastViewportBounds = null;
     this.viewportCuller = new ViewportCuller((row) => this.layoutEngine.getRowY(row));
     this.barRenderer = new BarRenderer(
@@ -7451,7 +7622,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
     );
     this.barRenderer.sequenceMode = true;
     this.barRenderer.denseToSparse = this._denseToSparse;
-    this.barRenderer.propertyColors = (_o = this.plugin.settings.propertyColors) != null ? _o : {};
+    this.barRenderer.propertyColors = (_u = this.plugin.settings.propertyColors) != null ? _u : {};
     const barDisplayProps = [];
     for (const key of ["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"]) {
       const val = this.config.get(key);
@@ -7464,7 +7635,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
       this.plugin.settings.barPropertyMinWidth,
       this.plugin.settings.showBarProperties
     );
-    const focusTagRaw = ((_p = this.config.get("focusTag")) == null ? void 0 : _p.trim()) || null;
+    const focusTagRaw = ((_v = this.config.get("focusTag")) == null ? void 0 : _v.trim()) || null;
     this.barRenderer.setFocusTag(focusTagRaw ? focusTagRaw.replace(/^#/, "") : null);
     if (isGrouped) {
       this.groupHeaderRenderer = new GroupHeaderRenderer(
@@ -7497,17 +7668,19 @@ var SequenceView = class extends import_obsidian9.BasesView {
       });
     }
     if (prevScrollLeft || prevScrollTop) {
-      requestAnimationFrame(() => {
-        var _a2;
+      this.restoreFrame = requestAnimationFrame(() => {
+        var _a2, _b2;
+        if (((_a2 = this.timelineRenderer) == null ? void 0 : _a2.element) !== timelineBody) return;
         timelineBody.scrollLeft = prevScrollLeft;
         timelineBody.scrollTop = prevScrollTop;
-        (_a2 = this.headerRenderer) == null ? void 0 : _a2.setScrollLeft(prevScrollLeft);
+        (_b2 = this.headerRenderer) == null ? void 0 : _b2.setScrollLeft(prevScrollLeft);
         if (this.sideTableRenderer) {
           this.sideTableRenderer.scrollBody.scrollTop = prevScrollTop;
         }
         if (this.cullingActive) {
           this.renderVisibleBars();
         }
+        this.restoreFrame = null;
       });
     }
   }
@@ -7710,22 +7883,71 @@ var SequenceView = class extends import_obsidian9.BasesView {
     }
     this.collaboration.changed();
   }
+  rangeState() {
+    return this.timelineRenderer && this.currentEntries.length ? {
+      axis: this.axis,
+      config: this.config,
+      renderer: "sabidurian-sequence",
+      svg: this.timelineRenderer.svgElement,
+      viewport: this.timelineRenderer.element,
+      denseValues: this._denseToSparse
+    } : void 0;
+  }
+  focusDiscussionRange(range, axis) {
+    var _a;
+    if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) return false;
+    const state = this.rangeState();
+    if (!state) return false;
+    const focus = createRangeFocus(range, state, axis), top = state.viewport.scrollTop;
+    (_a = this.rangeReturn) != null ? _a : this.rangeReturn = { left: state.viewport.scrollLeft, top };
+    this.rangeFocus = focus;
+    this.pendingViewport = { left: 0, top };
+    this.onDataUpdated();
+    if (!this.timelineRenderer || this.rangeFocus !== focus) return false;
+    this.timelineRenderer.element.scrollTop = top;
+    return true;
+  }
+  restoreRangeView() {
+    var _a, _b;
+    if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) {
+      new import_obsidian9.Notice("Save or discard the task inspector changes before returning to data.");
+      return;
+    }
+    this.pendingViewport = this.rangeReturn;
+    this.rangeFocus = void 0;
+    this.rangeReturn = void 0;
+    this.onDataUpdated();
+    (_b = (_a = this.rootEl) == null ? void 0 : _a.querySelector(".sabidurian-dense-btn")) == null ? void 0 : _b.focus({ preventScroll: true });
+  }
+  finishRangeNavigation() {
+    var _a, _b, _c;
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
+    this.restoreFrame = null;
+    const body = (_a = this.timelineRenderer) == null ? void 0 : _a.element;
+    if (!body) return;
+    (_b = this.headerRenderer) == null ? void 0 : _b.setScrollLeft(body.scrollLeft);
+    (_c = this.groupHeaderRenderer) == null ? void 0 : _c.setScrollLeft(body.scrollLeft);
+    if (this.sideTableRenderer) this.sideTableRenderer.scrollBody.scrollTop = body.scrollTop;
+    this.lastViewportBounds = null;
+    if (this.cullingActive) this.renderVisibleBars();
+  }
   revealDiscussionTarget(target) {
-    var _a, _b, _c, _d;
+    var _a, _b;
     if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) return "busy";
     const matches = this.currentEntries.filter((entry2) => entry2.file === target.file);
     if (matches.length > 1) return "ambiguous";
     const entry = matches[0], body = (_a = this.timelineRenderer) == null ? void 0 : _a.element;
     if (!entry || !body) return "unavailable";
+    if (this.rangeFocus) {
+      this.restoreRangeView();
+      return this.revealDiscussionTarget(target);
+    }
     if (entry.row < 0) return "hidden";
     if (target.type === "cell" && (!this.plugin.settings.showBarProperties || !["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"].some((key) => this.config.get(key) === target.property))) return "property-hidden";
     body.scrollLeft = Math.max(0, entry.x - Math.min(48, body.clientWidth / 4));
     body.scrollTop = Math.max(0, this.layoutEngine.getRowY(entry.row) - 12);
-    (_b = this.headerRenderer) == null ? void 0 : _b.setScrollLeft(body.scrollLeft);
-    (_c = this.groupHeaderRenderer) == null ? void 0 : _c.setScrollLeft(body.scrollLeft);
-    this.lastViewportBounds = null;
-    if (this.cullingActive) this.renderVisibleBars();
-    if (target.type === "cell" && !((_d = this.barRenderer) == null ? void 0 : _d.collaborationHandles().some((handle) => handle.target.type === "cell" && handle.target.file === target.file && handle.target.property === target.property))) return "property-hidden";
+    this.finishRangeNavigation();
+    if (target.type === "cell" && !((_b = this.barRenderer) == null ? void 0 : _b.collaborationHandles().some((handle) => handle.target.type === "cell" && handle.target.file === target.file && handle.target.property === target.property))) return "property-hidden";
     this.collaboration.changed();
     return "revealed";
   }
@@ -7888,6 +8110,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
     var _a, _b, _c;
     if (!this.rootEl) return;
     const controlsEl = this.rootEl.createDiv({ cls: "sabidurian-controls" });
+    if (this.rangeFocus) renderRangeFocus(controlsEl, this.rangeFocus, () => this.restoreRangeView());
     controlsEl.createEl("span", {
       cls: "sabidurian-controls-info",
       text: `${entryCount} entries`
@@ -7915,6 +8138,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
       cls: `sabidurian-today-btn sabidurian-dense-btn${denseMode ? " sabidurian-dense-active" : ""}`,
       text: denseMode ? "Sparse" : "Dense"
     });
+    denseBtn.disabled = !!this.rangeFocus;
     denseBtn.addEventListener("click", () => {
       this.config.set("denseMode", !denseMode);
       this.onDataUpdated();
@@ -7977,6 +8201,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
   }
   onunload() {
     var _a, _b, _c;
+    if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
     (_a = this.releaseCollaboration) == null ? void 0 : _a.call(this);
     this.collaboration.dispose();
     (_b = this.plugin.colorSubscribers) == null ? void 0 : _b.delete(this.refreshColors);

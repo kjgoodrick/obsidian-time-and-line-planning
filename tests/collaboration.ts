@@ -6,6 +6,8 @@ import { SequenceView } from '../src/SequenceView';
 import { CollaborationBridge, type TimelineHandle } from '../src/collaboration/CollaborationBridge';
 import { TaskInspector } from '../src/interaction/TaskInspector';
 import { Modal } from './obsidian-mock';
+import { parseTimelineRange } from '../src/collaboration/TimelineRange';
+import { projectRange } from '../src/collaboration/RangeProjection';
 
 const win = new Window();
 Object.assign(globalThis, { window: win, document: win.document, MouseEvent: win.MouseEvent, CSS: win.CSS });
@@ -245,9 +247,9 @@ test('disposal invalidates captured handles and notifies independent consumers e
   f.view.onunload(); assert.deepEqual(f.bridge.getSurfaces(), []);
 });
 
-function rangeLayout(f: ReturnType<typeof fixture>) {
+function rangeLayout(f: ReturnType<typeof fixture>, resetAxis = true) {
   const viewport = f.view.timelineRenderer.element as HTMLElement, svg = f.view.timelineRenderer.svgElement as SVGSVGElement;
-  f.view.axis.setView(f.view.type === 'sabidurian-sequence' ? 1 : 2026, f.view.type === 'sabidurian-sequence' ? 5 : 2027, 800);
+  if (resetAxis) f.view.axis.setView(f.view.type === 'sabidurian-sequence' ? 1 : 2026, f.view.type === 'sabidurian-sequence' ? 5 : 2027, 800);
   Object.defineProperties(viewport, { clientWidth: { value: 400, configurable: true }, clientHeight: { value: 200, configurable: true }, scrollWidth: { value: 800, configurable: true } });
   viewport.scrollLeft = 0;
   viewport.getBoundingClientRect = () => ({ left: 100, right: 500, top: 50, bottom: 250, width: 400, height: 200 } as DOMRect);
@@ -351,11 +353,100 @@ test('range selection refuses dirty inspector input and stale callbacks after un
   f.view.onunload(); assert.equal(stopped, 1); assert.equal(document.querySelector('.sabidurian-range-selection-status'), null);
 });
 
-test('range reveal preserves vertical position and fails explicitly for an interval outside the rendered axis', () => {
+test('range reveal preserves vertical position and temporarily focuses an interval outside the rendered axis', () => {
   const f = fixture('sequence'), { viewport } = rangeLayout(f), context = f.surface.rangeContext()!;
   viewport.scrollTop = 123; const before = JSON.stringify(f.configWrites);
   assert.equal(f.surface.revealRange({ ...ordinal, start: '3', end: '4' }, context.axis), 'revealed');
   assert.equal(viewport.scrollLeft, 352); assert.equal(viewport.scrollTop, 123);
-  assert.equal(f.surface.revealRange({ ...ordinal, start: '100', end: '101' }, context.axis), 'hidden');
-  assert.equal(viewport.scrollLeft, 352); assert.equal(JSON.stringify(f.configWrites), before);
+  assert.equal(f.surface.revealRange({ ...ordinal, start: '100', end: '101' }, context.axis), 'revealed');
+  assert.equal(f.surface.viewport().scrollTop, 123); assert.equal(context.current(), false); assert.equal(JSON.stringify(f.configWrites), before);
+});
+
+const flushFrames = () => { for (const callback of [...frames.values()]) callback(0); frames.clear(); };
+const distantRange = (sequence: boolean) => parseTimelineRange(sequence ? { ...ordinal, start: '-100', end: '-50' } : {
+  version: 1, kind: 'calendar', start: '1800-01-01', end: '1800-01-02', time_zone: 'UTC', start_inclusive: true, end_inclusive: true });
+
+for (const kind of ['timeline', 'sequence'] as const) {
+  test(`${kind}: range focus preserves data/settings, survives refresh and returns to the original viewport`, () => {
+    const f = fixture(kind), before = JSON.stringify(f.values), { viewport } = rangeLayout(f, false);
+    const bounds = [f.view.axis.viewStart, f.view.axis.viewEnd], context = f.surface.rangeContext()!;
+    viewport.scrollLeft = 23; viewport.scrollTop = 37;
+    const range = distantRange(kind === 'sequence'), unchanged = JSON.stringify(range);
+    assert.equal(f.surface.revealRange(range, context.axis), 'revealed');
+    assert.equal(context.current(), false); assert.equal(viewport.isConnected, false);
+    assert.ok(f.root.querySelector('.sabidurian-comment-range-focus')); assert.equal(f.surface.viewport().scrollTop, 37);
+    assert.ok(f.view.axis.totalWidth <= 3200); assert.equal(f.view.cullingActive, true);
+    const projected = projectRange(range, f.view.rangeState(), context.axis);
+    assert.ok(projected.start >= 0 && projected.end <= f.view.axis.totalWidth);
+    const focused = [f.view.axis.viewStart, f.view.axis.viewEnd];
+    flushFrames(); assert.equal(f.surface.viewport().scrollTop, 37);
+    f.view.onDataUpdated(); flushFrames(); assert.deepEqual([f.view.axis.viewStart, f.view.axis.viewEnd], focused);
+    // A second distant target retains the original return point.
+    const second = kind === 'sequence' ? parseTimelineRange({ ...ordinal, start: '1000', end: '1010' }) : parseTimelineRange({ ...range, start: '2100-01-01', end: '2100-01-02' });
+    assert.equal(f.surface.revealRange(second, context.axis), 'revealed'); flushFrames();
+    f.root.querySelector<HTMLButtonElement>('.sabidurian-comment-range-focus button')!.click(); flushFrames();
+    assert.equal(f.root.querySelector('.sabidurian-comment-range-focus'), null);
+    assert.deepEqual([f.view.axis.viewStart, f.view.axis.viewEnd], bounds);
+    assert.ok(Math.abs(f.surface.viewport().scrollLeft - 23) < 0.00001); assert.equal(f.surface.viewport().scrollTop, 37);
+    assert.equal(JSON.stringify(range), unchanged); assert.equal(JSON.stringify(f.values), before);
+    assert.deepEqual(f.writes, []); assert.deepEqual(f.configWrites, []);
+  });
+
+  test(`${kind}: lane range focus retains the exact collapsed source group`, () => {
+    const f = fixture(kind, true), context = f.surface.rangeContext()!, group = f.view.data.groupedData[0];
+    const range = distantRange(kind === 'sequence');
+    assert.equal(f.surface.revealRange(range, context.axis, { ...group }), 'unavailable');
+    assert.equal(f.root.querySelector('.sabidurian-comment-range-focus'), null);
+    assert.equal(f.surface.revealRange(range, context.axis, group), 'revealed');
+    assert.equal(f.surface.groups()[0].target.group, group);
+    assert.deepEqual(f.values.collapsedGroups, ['Lane']); assert.deepEqual(f.configWrites, []);
+    const { viewport } = rangeLayout(f, false), handle = f.surface.groups()[0];
+    handle.element.getBoundingClientRect = () => new win.DOMRect(100, 80, 400, 28);
+    const geometry = f.surface.rangeGeometry(range, context.axis, group);
+    assert.ok(geometry?.current()); assert.equal(geometry.top, 80); assert.equal(geometry.bottom, 108);
+    flushFrames(); assert.equal(viewport.scrollTop, 12); // The collapsed header is at y=24; pending restoration must not undo its reveal.
+  });
+
+  test(`${kind}: changed axes clear focus and invalid requests never move the viewport`, () => {
+    const f = fixture(kind), context = f.surface.rangeContext()!, range = distantRange(kind === 'sequence');
+    assert.equal(f.surface.revealRange(range, { ...context.axis, start_property: { source: 'note', name: 'other' } }), 'unavailable');
+    assert.equal(f.root.querySelector('.sabidurian-comment-range-focus'), null);
+    assert.equal(f.surface.revealRange(range, context.axis), 'revealed');
+    f.values[kind === 'sequence' ? 'orderProp' : 'startDateProp'] = 'note.missing'; f.view.onDataUpdated(); flushFrames();
+    assert.equal(f.root.querySelector('.sabidurian-comment-range-focus'), null); assert.equal(f.view.rangeFocus, undefined);
+    assert.deepEqual(f.configWrites, []); assert.deepEqual(f.writes, []);
+  });
+
+  test(`${kind}: returning to an item exits range focus without delayed scroll overriding navigation`, () => {
+    const f = fixture(kind), context = f.surface.rangeContext()!, range = distantRange(kind === 'sequence');
+    assert.equal(f.surface.revealRange(range, context.axis), 'revealed');
+    assert.equal(f.surface.reveal({ type: 'item', file: f.files[0] }), 'revealed');
+    assert.equal(f.root.querySelector('.sabidurian-comment-range-focus'), null);
+    const left = f.surface.viewport().scrollLeft, top = f.surface.viewport().scrollTop;
+    flushFrames(); assert.equal(f.surface.viewport().scrollLeft, left); assert.equal(f.surface.viewport().scrollTop, top);
+  });
+}
+
+test('dense Sequence range navigation uses original values temporarily, then restores dense layout', () => {
+  const f = fixture('sequence'); f.values.denseMode = true; f.view.onDataUpdated(); flushFrames();
+  const context = f.surface.rangeContext()!, before = [...f.view._denseToSparse];
+  assert.equal(f.surface.revealRange({ ...ordinal, start: '999999999999998.000000001', end: '999999999999998.000000002' }, context.axis), 'revealed');
+  assert.equal(f.values.denseMode, true); assert.equal(f.view._denseToSparse, null);
+  assert.match(f.root.querySelector('.sabidurian-comment-range-focus')!.textContent!, /Original property values/);
+  f.root.querySelector<HTMLButtonElement>('.sabidurian-comment-range-focus button')!.click(); flushFrames();
+  assert.deepEqual(f.view._denseToSparse, before); assert.deepEqual(f.configWrites, []); assert.deepEqual(f.writes, []);
+});
+
+test('dirty inspector input blocks both range focus and return without discarding the draft', () => {
+  const f = fixture('timeline'), context = f.surface.rangeContext()!, range = distantRange(false);
+  const modal = new TaskInspector(f.plugin.app as any, f.files[0] as any,
+    { start: 'start', end: 'end', label: 'title', dependencies: 'blocked-by', zone: 'UTC' }, f.plugin.history as any, false, () => {}, () => {});
+  modal.open(); const input = modal.contentEl.querySelector('input')!; input.value = '2026-11-26T08:05:00';
+  assert.equal(f.surface.revealRange(range, context.axis), 'busy'); assert.equal(f.root.querySelector('.sabidurian-comment-range-focus'), null);
+  modal.close(); assert.equal(f.surface.revealRange(range, context.axis), 'revealed');
+  modal.open(); const draft = modal.contentEl.querySelector('input')!; draft.value = '2026-11-26T08:10:00';
+  const retained = draft.value;
+  f.root.querySelector<HTMLButtonElement>('.sabidurian-comment-range-focus button')!.click();
+  assert.ok(f.root.querySelector('.sabidurian-comment-range-focus')); assert.equal(draft.value, retained);
+  assert.deepEqual(f.configWrites, []); assert.deepEqual(f.writes, []);
 });

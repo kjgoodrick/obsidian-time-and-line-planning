@@ -11,6 +11,8 @@ import { BAR_HEIGHT } from '../model/LayoutEngine';
 import { formatSabidurianDate, formatDateRange } from '../utils/dateUtils';
 import type { NumericAxis } from '../scale/NumericAxis';
 import { getPropertyTone, type PropertyColors } from '../utils/colorUtils';
+import type { BasesPropertyId } from 'obsidian';
+import type { TimelineHandle, TimelineTarget, TimelinePoint } from '../collaboration/CollaborationBridge';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const POINT_RADIUS = 7;
@@ -23,6 +25,39 @@ export class BarRenderer {
   private barGroup: SVGGElement;
   private tooltipEl: HTMLElement | null = null;
   private defsEl: SVGDefsElement | null = null;
+  private targetNodes = new Map<SVGElement, TimelineHandle>();
+  private propertyNodes = new Set<SVGElement>();
+  private renderRevision = 0;
+  private displayPropertyIds = new Map<string, BasesPropertyId | null>();
+
+  invalidateCollaboration(): void { this.renderRevision++; this.targetNodes.clear(); this.propertyNodes.clear(); }
+
+  collaborationHandles(): TimelineHandle[] { return this.targetNodes.size <= 2048 ? [...this.targetNodes.values()].filter(handle => handle.current()) : []; }
+  collaborationHit(node: Node, point?: TimelinePoint): TimelineHandle | undefined {
+    for (let current: Node | null = node, depth = 0; current && current !== this.svg && depth < 32; current = current.parentNode, depth++) {
+      if (this.propertyNodes.has(current as SVGElement) && !this.targetNodes.has(current as SVGElement)) return;
+      const handle = this.targetNodes.get(current as SVGElement);
+      if (handle?.current()) {
+        // The transparent task hit area covers badges. Inspect only this bar's
+        // registered property nodes when a click supplies viewport coordinates.
+        if (handle.target.type === 'item' && point && Number.isFinite(point.clientX) && Number.isFinite(point.clientY)) {
+          for (const element of this.propertyNodes) {
+            if (!handle.element.contains(element) || !element.isConnected) continue;
+            const rect = element.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0 && point.clientX >= rect.left && point.clientX < rect.right && point.clientY >= rect.top && point.clientY < rect.bottom) {
+              const candidate = this.targetNodes.get(element); return candidate?.current() ? candidate : undefined;
+            }
+          }
+        }
+        return handle;
+      }
+    }
+  }
+  private bindTarget(element: SVGElement, target: TimelineTarget): void {
+    const revision = this.renderRevision;
+    this.targetNodes.set(element, Object.freeze({ target: Object.freeze({ ...target }), element,
+      current: () => this.renderRevision === revision && element.isConnected && this.svg.contains(element) }));
+  }
 
   /** When true, tooltip shows ordinal position instead of dates. */
   sequenceMode = false;
@@ -88,12 +123,19 @@ export class BarRenderer {
 
   /** Configure property badge display. Call before render(). */
   setDisplayProps(props: string[], minWidth: number, enabled: boolean): void {
-    this.displayProps = props.filter(Boolean).slice(0, 3);
+    this.displayPropertyIds.clear();
+    this.displayProps = props.filter(Boolean).slice(0, 3).map(property => {
+      const id = /^(?:note|file|formula)\./.test(property) ? property : 'note.' + property;
+      const key = id.replace(/^note\./, '');
+      const previous = this.displayPropertyIds.get(key);
+      this.displayPropertyIds.set(key, previous === undefined || previous === id ? id as BasesPropertyId : null); return key;
+    });
     this.badgeMinWidth = minWidth;
     this.badgesEnabled = enabled;
   }
 
   render(entries: SabidurianEntry[], getRowY: (row: number) => number): void {
+    this.invalidateCollaboration();
     // Clear previous bars
     while (this.barGroup.firstChild) {
       this.barGroup.removeChild(this.barGroup.firstChild);
@@ -117,6 +159,7 @@ export class BarRenderer {
       group.classList.add('sabidurian-bar-unfocused');
     }
     group.dataset.filePath = entry.file.path;
+    this.bindTarget(group, { type: 'item', file: entry.file });
 
     // ── Fuzzy/uncertainty extensions (rendered BEFORE main bar) ──
     if (this.axis) {
@@ -216,6 +259,9 @@ export class BarRenderer {
       const badge = document.createElementNS(SVG_NS, 'g');
       badge.classList.add('sabidurian-property-badge');
       badge.dataset.property = property;
+      this.propertyNodes.add(badge);
+      const propertyId = this.displayPropertyIds.get(property);
+      if (propertyId) this.bindTarget(badge, { type: 'cell', file: entry.file, property: propertyId });
       badge.dataset.sabidurianColor = getPropertyTone(property, value, this.propertyColors) ?? 'gray';
       const bg = document.createElementNS(SVG_NS, 'rect');
       bg.setAttribute('x', `${labelRight + 7}`);
@@ -326,6 +372,7 @@ export class BarRenderer {
       group.classList.add('sabidurian-bar-unfocused');
     }
     group.dataset.filePath = entry.file.path;
+    this.bindTarget(group, { type: 'item', file: entry.file });
 
     const cx = entry.x;
     const cy = y + BAR_HEIGHT / 2;
@@ -503,6 +550,7 @@ export class BarRenderer {
   }
 
   destroy(): void {
+    this.invalidateCollaboration();
     this.tooltipEl?.remove();
     this.tooltipEl = null;
   }

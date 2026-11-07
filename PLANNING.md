@@ -42,3 +42,8 @@ Native table coloring only decorates existing cells and leaves editing to Obsidi
 Run `npm run test:webkit`, then `npm run test:webkit:simulator` in another terminal. This serves synthetic fixtures only on loopback and opens the actual timeline UI in iPhone Simulator Safari. See [tests/webkit/README.md](tests/webkit/README.md) for setup and limits. It exercises real iOS WebKit, native date inputs and touch scrolling, with a small Obsidian host adapter. It does not establish native Obsidian integration or physical-phone acceptance.
 
 See [TESTING.md](TESTING.md) for validation and remaining native iPhone checks, and [HANDOFF.md](HANDOFF.md) for development setup.
+
+The optional [collaboration bridge](COLLABORATION.md) now exposes local record and
+property-badge targets to companion plugins. It is a development API preview;
+usable Team Relay timeline comments, ranges, markers and presence are still being
+implemented. It adds no task writes or settings synchronization.

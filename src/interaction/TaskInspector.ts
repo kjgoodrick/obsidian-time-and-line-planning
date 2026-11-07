@@ -32,12 +32,18 @@ export class TaskPicker extends FuzzySuggestModal<TFile> {
 
 /** Uses Obsidian APIs and HTML controls supported by the iOS WKWebView. No desktop APIs. */
 export class TaskInspector extends Modal {
+  private static active = new Set<TaskInspector>();
+  private dirty = () => false;
+  static hasDirty(document: Document): boolean {
+    return [...this.active].some(inspector => inspector.contentEl.ownerDocument === document && inspector.contentEl.isConnected && inspector.dirty());
+  }
   constructor(app: App, private file: TFile, private fields: TaskFields,
     private history: EditHistory, private locked: boolean, private refresh: () => void,
     private unlock: () => void, private displayLabel?: string,
     private navigate?: (file: TFile) => void) { super(app); }
 
   onOpen(): void {
+    TaskInspector.active.add(this);
     const { contentEl: el } = this; el.addClass('sabidurian-inspector');
     const fm = this.app.metadataCache.getFileCache(this.file)?.frontmatter ?? {};
     const f = this.fields;
@@ -87,6 +93,7 @@ export class TaskInspector extends Modal {
           || dependencyKeys(deps) !== originalDependencies;
       } catch { return true; }
     };
+    this.dirty = isDirty;
     let closeButton: HTMLButtonElement | undefined;
     const navigationMessage = 'Save or discard your changes before leaving this task.';
     const updateCloseLabel = () => {
@@ -195,7 +202,7 @@ export class TaskInspector extends Modal {
     closeButton = actions.createEl('button', { text: 'Close' }); closeButton.onclick = () => this.close();
     updateCloseLabel();
   }
-  onClose(): void { this.contentEl.empty(); }
+  onClose(): void { TaskInspector.active.delete(this); this.dirty = () => false; this.contentEl.empty(); }
 }
 
 export interface NewTaskOptions {

@@ -508,7 +508,7 @@ var TaskPicker = class extends import_obsidian.FuzzySuggestModal {
     this.choose(file);
   }
 };
-var TaskInspector = class _TaskInspector extends import_obsidian.Modal {
+var _TaskInspector = class _TaskInspector extends import_obsidian.Modal {
   constructor(app, file, fields, history, locked, refresh, unlock, displayLabel, navigate) {
     super(app);
     this.file = file;
@@ -519,9 +519,14 @@ var TaskInspector = class _TaskInspector extends import_obsidian.Modal {
     this.unlock = unlock;
     this.displayLabel = displayLabel;
     this.navigate = navigate;
+    this.dirty = () => false;
+  }
+  static hasDirty(document2) {
+    return [...this.active].some((inspector) => inspector.contentEl.ownerDocument === document2 && inspector.contentEl.isConnected && inspector.dirty());
   }
   onOpen() {
     var _a, _b, _c, _d, _e, _f, _g;
+    _TaskInspector.active.add(this);
     const { contentEl: el } = this;
     el.addClass("sabidurian-inspector");
     const fm = (_b = (_a = this.app.metadataCache.getFileCache(this.file)) == null ? void 0 : _a.frontmatter) != null ? _b : {};
@@ -584,6 +589,7 @@ var TaskInspector = class _TaskInspector extends import_obsidian.Modal {
         return true;
       }
     };
+    this.dirty = isDirty;
     let closeButton;
     const navigationMessage = "Save or discard your changes before leaving this task.";
     const updateCloseLabel = () => {
@@ -750,9 +756,13 @@ var TaskInspector = class _TaskInspector extends import_obsidian.Modal {
     updateCloseLabel();
   }
   onClose() {
+    _TaskInspector.active.delete(this);
+    this.dirty = () => false;
     this.contentEl.empty();
   }
 };
+_TaskInspector.active = /* @__PURE__ */ new Set();
+var TaskInspector = _TaskInspector;
 var NewTaskModal = class extends import_obsidian.Modal {
   constructor(app, zone, initialStart, create, options = { dishes: [], chefs: [], ovens: [] }) {
     super(app);
@@ -819,6 +829,143 @@ var NewTaskModal = class extends import_obsidian.Modal {
   }
   onClose() {
     this.contentEl.empty();
+  }
+};
+
+// src/collaboration/CollaborationBridge.ts
+var TimelineSurface = class {
+  constructor(port) {
+    this.port = port;
+    this.protocolVersion = 1;
+    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal"]);
+    this.listeners = /* @__PURE__ */ new Set();
+    this.closed = false;
+    this.serial = 0;
+  }
+  get owner() {
+    return this.port.owner;
+  }
+  get root() {
+    return this.port.root;
+  }
+  get revision() {
+    return this.serial;
+  }
+  current() {
+    return !this.closed && this.port.root.isConnected;
+  }
+  viewport() {
+    const viewport = this.current() ? this.port.viewport() : void 0;
+    return (viewport == null ? void 0 : viewport.isConnected) && this.root.contains(viewport) ? viewport : void 0;
+  }
+  handle(value) {
+    const revision = this.serial;
+    return Object.freeze({ ...value, current: () => this.current() && this.serial === revision && value.current() });
+  }
+  handles() {
+    return this.current() ? this.port.handles().map((handle) => this.handle(handle)) : [];
+  }
+  hit(node, point) {
+    if (!this.current()) return;
+    const handle = this.port.hit(node, point);
+    return handle ? this.handle(handle) : void 0;
+  }
+  selection() {
+    return this.current() ? this.port.selection().slice(0, 256) : [];
+  }
+  geometry(target) {
+    const viewport = this.viewport();
+    if (!viewport) return;
+    const bounds = viewport.getBoundingClientRect();
+    for (const handle of this.handles()) {
+      const candidate = handle.target;
+      if (candidate.file !== target.file || candidate.type !== target.type || target.type === "cell" && (candidate.type !== "cell" || candidate.property !== target.property) || !handle.current()) continue;
+      const rect = handle.element.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0 && rect.right > bounds.left && rect.left < bounds.right && rect.bottom > bounds.top && rect.top < bounds.bottom) return rect;
+    }
+  }
+  reveal(target) {
+    return this.viewport() && ((target == null ? void 0 : target.type) === "item" || (target == null ? void 0 : target.type) === "cell") ? this.port.reveal(target) : "unavailable";
+  }
+  onChange(listener) {
+    if (this.closed) return () => {
+    };
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+  changed() {
+    if (this.closed) return;
+    this.serial++;
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch (e) {
+      }
+    }
+  }
+  dispose() {
+    if (this.closed) return;
+    this.closed = true;
+    this.serial++;
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch (e) {
+      }
+    }
+    this.listeners.clear();
+  }
+};
+var CollaborationBridge = class {
+  constructor() {
+    this.protocolVersion = 1;
+    this.surfaces = /* @__PURE__ */ new Set();
+    this.listeners = /* @__PURE__ */ new Set();
+    this.closed = false;
+  }
+  getSurfaces() {
+    return this.closed ? [] : [...this.surfaces].filter((surface) => surface.current());
+  }
+  register(surface) {
+    if (this.closed) {
+      surface.dispose();
+      return () => {
+      };
+    }
+    this.surfaces.add(surface);
+    const stop = surface.onChange(() => this.notify());
+    this.notify();
+    return () => {
+      stop();
+      surface.dispose();
+      if (this.surfaces.delete(surface)) this.notify();
+    };
+  }
+  onChange(listener) {
+    if (this.closed) return () => {
+    };
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+  notify() {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch (e) {
+      }
+    }
+  }
+  dispose() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const surface of this.surfaces) surface.dispose();
+    this.surfaces.clear();
+    this.notify();
+    this.listeners.clear();
   }
 };
 
@@ -1200,6 +1347,10 @@ var BarRenderer = class {
   constructor(svg, app, tooltipParent) {
     this.tooltipEl = null;
     this.defsEl = null;
+    this.targetNodes = /* @__PURE__ */ new Map();
+    this.propertyNodes = /* @__PURE__ */ new Set();
+    this.renderRevision = 0;
+    this.displayPropertyIds = /* @__PURE__ */ new Map();
     /** When true, tooltip shows ordinal position instead of dates. */
     this.sequenceMode = false;
     this.inspect = null;
@@ -1224,6 +1375,41 @@ var BarRenderer = class {
     svg.appendChild(this.barGroup);
     this.tooltipEl = svg.ownerDocument.body.createDiv({ cls: "sabidurian-tooltip" });
     this.tooltipEl.style.display = "none";
+  }
+  invalidateCollaboration() {
+    this.renderRevision++;
+    this.targetNodes.clear();
+    this.propertyNodes.clear();
+  }
+  collaborationHandles() {
+    return this.targetNodes.size <= 2048 ? [...this.targetNodes.values()].filter((handle) => handle.current()) : [];
+  }
+  collaborationHit(node, point) {
+    for (let current = node, depth = 0; current && current !== this.svg && depth < 32; current = current.parentNode, depth++) {
+      if (this.propertyNodes.has(current) && !this.targetNodes.has(current)) return;
+      const handle = this.targetNodes.get(current);
+      if (handle == null ? void 0 : handle.current()) {
+        if (handle.target.type === "item" && point && Number.isFinite(point.clientX) && Number.isFinite(point.clientY)) {
+          for (const element of this.propertyNodes) {
+            if (!handle.element.contains(element) || !element.isConnected) continue;
+            const rect = element.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0 && point.clientX >= rect.left && point.clientX < rect.right && point.clientY >= rect.top && point.clientY < rect.bottom) {
+              const candidate = this.targetNodes.get(element);
+              return (candidate == null ? void 0 : candidate.current()) ? candidate : void 0;
+            }
+          }
+        }
+        return handle;
+      }
+    }
+  }
+  bindTarget(element, target) {
+    const revision = this.renderRevision;
+    this.targetNodes.set(element, Object.freeze({
+      target: Object.freeze({ ...target }),
+      element,
+      current: () => this.renderRevision === revision && element.isConnected && this.svg.contains(element)
+    }));
   }
   /** Set the axis for fuzzy date rendering. Call before render(). */
   setAxis(axis) {
@@ -1251,11 +1437,19 @@ var BarRenderer = class {
   }
   /** Configure property badge display. Call before render(). */
   setDisplayProps(props, minWidth, enabled) {
-    this.displayProps = props.filter(Boolean).slice(0, 3);
+    this.displayPropertyIds.clear();
+    this.displayProps = props.filter(Boolean).slice(0, 3).map((property) => {
+      const id = /^(?:note|file|formula)\./.test(property) ? property : "note." + property;
+      const key = id.replace(/^note\./, "");
+      const previous = this.displayPropertyIds.get(key);
+      this.displayPropertyIds.set(key, previous === void 0 || previous === id ? id : null);
+      return key;
+    });
     this.badgeMinWidth = minWidth;
     this.badgesEnabled = enabled;
   }
   render(entries, getRowY) {
+    this.invalidateCollaboration();
     while (this.barGroup.firstChild) {
       this.barGroup.removeChild(this.barGroup.firstChild);
     }
@@ -1276,6 +1470,7 @@ var BarRenderer = class {
       group.classList.add("sabidurian-bar-unfocused");
     }
     group.dataset.filePath = entry.file.path;
+    this.bindTarget(group, { type: "item", file: entry.file });
     if (this.axis) {
       if (entry.earliestStartYear != null && entry.earliestStartYear < entry.startYear) {
         const earlyX = this.axis.yearToPixel(entry.earliestStartYear);
@@ -1367,6 +1562,9 @@ var BarRenderer = class {
       const badge = document.createElementNS(SVG_NS2, "g");
       badge.classList.add("sabidurian-property-badge");
       badge.dataset.property = property;
+      this.propertyNodes.add(badge);
+      const propertyId = this.displayPropertyIds.get(property);
+      if (propertyId) this.bindTarget(badge, { type: "cell", file: entry.file, property: propertyId });
       badge.dataset.sabidurianColor = (_b = getPropertyTone(property, value, this.propertyColors)) != null ? _b : "gray";
       const bg = document.createElementNS(SVG_NS2, "rect");
       bg.setAttribute("x", `${labelRight + 7}`);
@@ -1460,6 +1658,7 @@ var BarRenderer = class {
       group.classList.add("sabidurian-bar-unfocused");
     }
     group.dataset.filePath = entry.file.path;
+    this.bindTarget(group, { type: "item", file: entry.file });
     const cx = entry.x;
     const cy = y + BAR_HEIGHT / 2;
     const r = POINT_RADIUS;
@@ -1614,6 +1813,7 @@ var BarRenderer = class {
   }
   destroy() {
     var _a;
+    this.invalidateCollaboration();
     (_a = this.tooltipEl) == null ? void 0 : _a.remove();
     this.tooltipEl = null;
   }
@@ -4428,7 +4628,7 @@ var CULLING_THRESHOLD = 150;
 var SYSTEM_PROP_PREFIXES = ["file.", "formula."];
 var SabidurianView = class extends import_obsidian8.BasesView {
   constructor(controller, scrollEl, plugin) {
-    var _a;
+    var _a, _b;
     super(controller);
     this.type = "sabidurian-timeline";
     this.rootEl = null;
@@ -4486,11 +4686,33 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     this.refreshColors = () => this.onDataUpdated();
     this.scrollEl = scrollEl;
     this.plugin = plugin;
-    (_a = plugin.colorSubscribers) == null ? void 0 : _a.add(this.refreshColors);
+    this.collaboration = new TimelineSurface({
+      owner: this,
+      root: scrollEl,
+      viewport: () => {
+        var _a2;
+        return (_a2 = this.timelineRenderer) == null ? void 0 : _a2.element;
+      },
+      handles: () => {
+        var _a2, _b2;
+        return (_b2 = (_a2 = this.barRenderer) == null ? void 0 : _a2.collaborationHandles()) != null ? _b2 : [];
+      },
+      hit: (node, point) => {
+        var _a2;
+        return (_a2 = this.barRenderer) == null ? void 0 : _a2.collaborationHit(node, point);
+      },
+      selection: () => {
+        var _a2, _b2;
+        return (_b2 = (_a2 = this.selectionManager) == null ? void 0 : _a2.getSelectedEntries().map((entry) => entry.file)) != null ? _b2 : [];
+      },
+      reveal: (target) => this.revealDiscussionTarget(target)
+    });
+    this.releaseCollaboration = (_a = plugin.collaboration) == null ? void 0 : _a.register(this.collaboration);
+    (_b = plugin.colorSubscribers) == null ? void 0 : _b.add(this.refreshColors);
     this.renderSkeleton();
   }
   onDataUpdated() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C, _D;
     if (this.lockUpdateState && !this.pendingViewport && ((_a = this.rootEl) == null ? void 0 : _a.isConnected) && this.timelineRenderer) {
       const next = this.captureLockUpdateState();
       if (next === this.lockUpdateState) {
@@ -4500,44 +4722,46 @@ var SabidurianView = class extends import_obsidian8.BasesView {
       }
     }
     this.lockUpdateState = null;
-    const previous = (_b = this.pendingViewport) != null ? _b : this.timelineRenderer ? {
+    (_b = this.barRenderer) == null ? void 0 : _b.invalidateCollaboration();
+    this.collaboration.changed();
+    const previous = (_c = this.pendingViewport) != null ? _c : this.timelineRenderer ? {
       year: this.axis.pixelToYear(this.timelineRenderer.element.scrollLeft),
       top: this.timelineRenderer.element.scrollTop
     } : null;
     this.pendingViewport = previous;
     if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
-    (_c = this.taskEdges) == null ? void 0 : _c.destroy();
+    (_d = this.taskEdges) == null ? void 0 : _d.destroy();
     this.taskEdges = null;
-    (_d = this.dragManager) == null ? void 0 : _d.destroy();
+    (_e = this.dragManager) == null ? void 0 : _e.destroy();
     this.dragManager = null;
-    (_e = this.arrowDragManager) == null ? void 0 : _e.destroy();
+    (_f = this.arrowDragManager) == null ? void 0 : _f.destroy();
     this.arrowDragManager = null;
-    (_f = this.contextMenuManager) == null ? void 0 : _f.destroy();
+    (_g = this.contextMenuManager) == null ? void 0 : _g.destroy();
     this.contextMenuManager = null;
-    (_g = this.keyboardManager) == null ? void 0 : _g.destroy();
+    (_h = this.keyboardManager) == null ? void 0 : _h.destroy();
     this.keyboardManager = null;
-    (_h = this.selectionManager) == null ? void 0 : _h.destroy();
+    (_i = this.selectionManager) == null ? void 0 : _i.destroy();
     this.selectionManager = null;
-    (_i = this.touchManager) == null ? void 0 : _i.destroy();
+    (_j = this.touchManager) == null ? void 0 : _j.destroy();
     this.touchManager = null;
-    (_j = this.measureManager) == null ? void 0 : _j.destroy();
+    (_k = this.measureManager) == null ? void 0 : _k.destroy();
     this.measureManager = null;
-    (_k = this.markerRenderer) == null ? void 0 : _k.destroy();
+    (_l = this.markerRenderer) == null ? void 0 : _l.destroy();
     this.markerRenderer = null;
-    (_l = this.arrowRenderer) == null ? void 0 : _l.destroy();
+    (_m = this.arrowRenderer) == null ? void 0 : _m.destroy();
     this.arrowRenderer = null;
-    (_m = this.groupHeaderRenderer) == null ? void 0 : _m.destroy();
+    (_n = this.groupHeaderRenderer) == null ? void 0 : _n.destroy();
     this.groupHeaderRenderer = null;
-    (_n = this.barRenderer) == null ? void 0 : _n.destroy();
+    (_o = this.barRenderer) == null ? void 0 : _o.destroy();
     this.barRenderer = null;
-    (_o = this.sideTableRenderer) == null ? void 0 : _o.destroy();
+    (_p = this.sideTableRenderer) == null ? void 0 : _p.destroy();
     this.sideTableRenderer = null;
     if (this.rootEl) {
       this.rootEl.remove();
     }
     this.scrollEl.querySelectorAll(":scope > .sabidurian-container").forEach((el) => el.remove());
     this.rootEl = this.scrollEl.createDiv({ cls: "sabidurian-container" });
-    const entries = (_q = (_p = this.data) == null ? void 0 : _p.data) != null ? _q : [];
+    const entries = (_r = (_q = this.data) == null ? void 0 : _q.data) != null ? _r : [];
     if (entries.length === 0) {
       this.renderEmptyState();
       return;
@@ -4562,8 +4786,8 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     const depPropRaw = this.config.get("dependencyProp");
     const depPropName = ((depPropRaw == null ? void 0 : depPropRaw.trim()) || this.plugin.settings.dependencyProperty || "blocked-by").replace(/^note\./, "");
     this.depPropName = depPropName;
-    const enableBCE = (_r = this.config.get("enableBCE")) != null ? _r : true;
-    const groupedData = (_t = (_s = this.data) == null ? void 0 : _s.groupedData) != null ? _t : [];
+    const enableBCE = (_s = this.config.get("enableBCE")) != null ? _s : true;
+    const groupedData = (_u = (_t = this.data) == null ? void 0 : _t.groupedData) != null ? _u : [];
     const isGrouped = groupedData.length > 1 || groupedData.length === 1 && groupedData[0].hasKey();
     const savedCollapsed = this.config.get("collapsedGroups");
     if (savedCollapsed) {
@@ -4612,7 +4836,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
         8e3
       );
     }
-    const initialScroll = (_u = this.config.get("initialScroll")) != null ? _u : "today";
+    const initialScroll = (_v = this.config.get("initialScroll")) != null ? _v : "today";
     const { viewStart, viewEnd, range } = this.computeViewBounds(
       sabidurianEntries,
       initialScroll === "today"
@@ -4620,10 +4844,10 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     const containerWidth = this.rootEl.clientWidth || 800;
     let savedScaleId = this.config.get("scaleId");
     if (savedScaleId === "hour") savedScaleId = "day";
-    this.currentScale = savedScaleId && savedScaleId !== "auto" ? (_v = SCALES.find((s) => s.id === savedScaleId)) != null ? _v : autoSelectScale(range, containerWidth) : autoSelectScale(range, containerWidth);
+    this.currentScale = savedScaleId && savedScaleId !== "auto" ? (_w = SCALES.find((s) => s.id === savedScaleId)) != null ? _w : autoSelectScale(range, containerWidth) : autoSelectScale(range, containerWidth);
     const columns = this.currentScale.getColumnBoundaries(viewStart, viewEnd, Number(this.config.get("tickMinutes") || 15));
     const MAX_CANVAS_WIDTH = 32e3;
-    const minColPx = (_w = this.currentScale.minColumnPx) != null ? _w : 80;
+    const minColPx = (_x = this.currentScale.minColumnPx) != null ? _x : 80;
     const densityWidth = Math.min(MAX_CANVAS_WIDTH, columns.length * minColPx);
     const canvasWidth = Math.max(containerWidth, densityWidth);
     this.axis.setView(this.currentScale.id === "month" && columns.length ? columns[0].start : viewStart, this.currentScale.id === "month" && columns.length ? columns[columns.length - 1].end : viewEnd, canvasWidth);
@@ -4634,7 +4858,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     const bodyContainerEl = this.rootEl.createDiv({ cls: "sabidurian-body-container" });
     const headerContainerEl = bodyContainerEl.createDiv({ cls: "sabidurian-header-container" });
     const isMobile = isMobileViewport();
-    const showTable = isMobile ? false : (_x = this.config.get("showTable")) != null ? _x : true;
+    const showTable = isMobile ? false : (_y = this.config.get("showTable")) != null ? _y : true;
     const savedTableWidth = this.config.get("tableWidth");
     const tableColumns = this.getTableColumns(startPropId, endPropId);
     if (showTable) {
@@ -4663,7 +4887,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
         this.plugin.app,
         savedTableWidth
       );
-      this.sideTableRenderer.propertyColors = (_y = this.plugin.settings.propertyColors) != null ? _y : {};
+      this.sideTableRenderer.propertyColors = (_z = this.plugin.settings.propertyColors) != null ? _z : {};
       if (isGrouped) {
         this.sideTableRenderer.renderGrouped(
           sabidurianGroups,
@@ -4690,10 +4914,10 @@ var SabidurianView = class extends import_obsidian8.BasesView {
         this.highlightBar(idx);
       });
     }
-    const showToday = (_z = this.config.get("showToday")) != null ? _z : true;
+    const showToday = (_A = this.config.get("showToday")) != null ? _A : true;
     this.timelineRenderer = new TimelineRenderer(contentEl);
     this.timelineRenderer.render(columns, this.axis, canvasHeight, showToday);
-    this._showArrows = (_A = this.config.get("showArrows")) != null ? _A : true;
+    this._showArrows = (_B = this.config.get("showArrows")) != null ? _B : true;
     this._isGrouped = isGrouped;
     this.allVisibleEntries = visibleEntries;
     this.cullingActive = visibleEntries.length > CULLING_THRESHOLD;
@@ -4705,14 +4929,14 @@ var SabidurianView = class extends import_obsidian8.BasesView {
       this.rootEl
     );
     this.barRenderer.setAxis(this.axis);
-    this.barRenderer.propertyColors = (_B = this.plugin.settings.propertyColors) != null ? _B : {};
+    this.barRenderer.propertyColors = (_C = this.plugin.settings.propertyColors) != null ? _C : {};
     this.barRenderer.inspect = (entry) => this.inspectTask(entry);
     this.barRenderer.setDatePropNames(this._startPropName, this._endPropName);
     const barDisplayProps = [];
     for (const key of ["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"]) {
       const val = this.config.get(key);
       if (val) {
-        barDisplayProps.push(val.replace(/^note\./, ""));
+        barDisplayProps.push(val);
       }
     }
     this.barRenderer.setDisplayProps(
@@ -4720,7 +4944,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
       this.plugin.settings.barPropertyMinWidth,
       this.plugin.settings.showBarProperties
     );
-    const focusTagRaw = ((_C = this.config.get("focusTag")) == null ? void 0 : _C.trim()) || null;
+    const focusTagRaw = ((_D = this.config.get("focusTag")) == null ? void 0 : _D.trim()) || null;
     this.barRenderer.setFocusTag(focusTagRaw ? focusTagRaw.replace(/^#/, "") : null);
     if (isGrouped) {
       this.groupHeaderRenderer = new GroupHeaderRenderer(
@@ -4969,6 +5193,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     }
     this.selectionManager = new SelectionManager(this.timelineRenderer.svgElement);
     this.selectionManager.attach(entriesToRender);
+    this.selectionManager.setSelectionChangeCallback(() => this.collaboration.changed());
     this.contextMenuManager = new ContextMenuManager(
       this.timelineRenderer.svgElement,
       this.plugin.app,
@@ -5039,6 +5264,22 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     });
     this.timelineRenderer.element.style.touchAction = "pan-x pan-y";
     this.timelineRenderer.raiseTodayMarker();
+    this.collaboration.changed();
+  }
+  revealDiscussionTarget(target) {
+    var _a;
+    if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) return "busy";
+    const matches = this.currentEntries.filter((entry2) => entry2.file === target.file);
+    if (matches.length > 1) return "ambiguous";
+    const entry = matches[0];
+    if (!entry || !this.timelineRenderer) return "unavailable";
+    if (entry.row < 0) return "hidden";
+    if (target.type === "cell" && (!this.plugin.settings.showBarProperties || !["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"].some((key) => this.config.get(key) === target.property))) return "property-hidden";
+    this.timelineRenderer.element.scrollTop = Math.max(0, this.layoutEngine.getRowY(entry.row) - 12);
+    this.jumpToTaskBoundary(entry, "start");
+    if (target.type === "cell" && !((_a = this.barRenderer) == null ? void 0 : _a.collaborationHandles().some((handle) => handle.target.type === "cell" && handle.target.file === target.file && handle.target.property === target.property))) return "property-hidden";
+    this.collaboration.changed();
+    return "revealed";
   }
   /** Scroll the timeline to today's position. */
   scrollToToday() {
@@ -5619,34 +5860,36 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     return maxPrecision(origPrecision, scalePrecision);
   }
   onunload() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n;
-    (_a = this.measureManager) == null ? void 0 : _a.destroy();
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o;
+    (_a = this.releaseCollaboration) == null ? void 0 : _a.call(this);
+    this.collaboration.dispose();
+    (_b = this.measureManager) == null ? void 0 : _b.destroy();
     this.measureManager = null;
-    (_b = this.taskEdges) == null ? void 0 : _b.destroy();
+    (_c = this.taskEdges) == null ? void 0 : _c.destroy();
     this.taskEdges = null;
-    (_c = this.plugin.colorSubscribers) == null ? void 0 : _c.delete(this.refreshColors);
+    (_d = this.plugin.colorSubscribers) == null ? void 0 : _d.delete(this.refreshColors);
     if (this.restoreFrame !== null) cancelAnimationFrame(this.restoreFrame);
-    (_d = this.dragManager) == null ? void 0 : _d.destroy();
+    (_e = this.dragManager) == null ? void 0 : _e.destroy();
     this.dragManager = null;
-    (_e = this.arrowDragManager) == null ? void 0 : _e.destroy();
+    (_f = this.arrowDragManager) == null ? void 0 : _f.destroy();
     this.arrowDragManager = null;
-    (_f = this.contextMenuManager) == null ? void 0 : _f.destroy();
+    (_g = this.contextMenuManager) == null ? void 0 : _g.destroy();
     this.contextMenuManager = null;
-    (_g = this.keyboardManager) == null ? void 0 : _g.destroy();
+    (_h = this.keyboardManager) == null ? void 0 : _h.destroy();
     this.keyboardManager = null;
-    (_h = this.selectionManager) == null ? void 0 : _h.destroy();
+    (_i = this.selectionManager) == null ? void 0 : _i.destroy();
     this.selectionManager = null;
-    (_i = this.touchManager) == null ? void 0 : _i.destroy();
+    (_j = this.touchManager) == null ? void 0 : _j.destroy();
     this.touchManager = null;
-    (_j = this.arrowRenderer) == null ? void 0 : _j.destroy();
+    (_k = this.arrowRenderer) == null ? void 0 : _k.destroy();
     this.arrowRenderer = null;
-    (_k = this.groupHeaderRenderer) == null ? void 0 : _k.destroy();
+    (_l = this.groupHeaderRenderer) == null ? void 0 : _l.destroy();
     this.groupHeaderRenderer = null;
-    (_l = this.barRenderer) == null ? void 0 : _l.destroy();
+    (_m = this.barRenderer) == null ? void 0 : _m.destroy();
     this.barRenderer = null;
-    (_m = this.sideTableRenderer) == null ? void 0 : _m.destroy();
+    (_n = this.sideTableRenderer) == null ? void 0 : _n.destroy();
     this.sideTableRenderer = null;
-    (_n = this.rootEl) == null ? void 0 : _n.remove();
+    (_o = this.rootEl) == null ? void 0 : _o.remove();
     this.rootEl = null;
   }
 };
@@ -6180,7 +6423,7 @@ var SYSTEM_PROP_PREFIXES2 = ["file.", "formula."];
 var STEP_WIDTH_PX = 100;
 var SequenceView = class extends import_obsidian9.BasesView {
   constructor(controller, scrollEl, plugin) {
-    var _a;
+    var _a, _b;
     super(controller);
     this.type = "sabidurian-sequence";
     this.rootEl = null;
@@ -6227,18 +6470,42 @@ var SequenceView = class extends import_obsidian9.BasesView {
     this.refreshColors = () => this.onDataUpdated();
     this.scrollEl = scrollEl;
     this.plugin = plugin;
-    (_a = plugin.colorSubscribers) == null ? void 0 : _a.add(this.refreshColors);
+    this.collaboration = new TimelineSurface({
+      owner: this,
+      root: scrollEl,
+      viewport: () => {
+        var _a2;
+        return (_a2 = this.timelineRenderer) == null ? void 0 : _a2.element;
+      },
+      handles: () => {
+        var _a2, _b2;
+        return (_b2 = (_a2 = this.barRenderer) == null ? void 0 : _a2.collaborationHandles()) != null ? _b2 : [];
+      },
+      hit: (node, point) => {
+        var _a2;
+        return (_a2 = this.barRenderer) == null ? void 0 : _a2.collaborationHit(node, point);
+      },
+      selection: () => {
+        var _a2, _b2;
+        return (_b2 = (_a2 = this.selectionManager) == null ? void 0 : _a2.getSelectedEntries().map((entry) => entry.file)) != null ? _b2 : [];
+      },
+      reveal: (target) => this.revealDiscussionTarget(target)
+    });
+    this.releaseCollaboration = (_a = plugin.collaboration) == null ? void 0 : _a.register(this.collaboration);
+    (_b = plugin.colorSubscribers) == null ? void 0 : _b.add(this.refreshColors);
     this.renderSkeleton();
   }
   onDataUpdated() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o;
-    const prevScrollLeft = (_b = (_a = this.timelineRenderer) == null ? void 0 : _a.element.scrollLeft) != null ? _b : 0;
-    const prevScrollTop = (_d = (_c = this.timelineRenderer) == null ? void 0 : _c.element.scrollTop) != null ? _d : 0;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p;
+    (_a = this.barRenderer) == null ? void 0 : _a.invalidateCollaboration();
+    this.collaboration.changed();
+    const prevScrollLeft = (_c = (_b = this.timelineRenderer) == null ? void 0 : _b.element.scrollLeft) != null ? _c : 0;
+    const prevScrollTop = (_e = (_d = this.timelineRenderer) == null ? void 0 : _d.element.scrollTop) != null ? _e : 0;
     this.destroyManagers();
     if (this.rootEl) this.rootEl.remove();
     this.scrollEl.querySelectorAll(":scope > .sabidurian-container").forEach((el) => el.remove());
     this.rootEl = this.scrollEl.createDiv({ cls: "sabidurian-container sabidurian-sequence-container" });
-    const entries = (_f = (_e = this.data) == null ? void 0 : _e.data) != null ? _f : [];
+    const entries = (_g = (_f = this.data) == null ? void 0 : _f.data) != null ? _g : [];
     if (entries.length === 0) {
       this.renderEmptyState();
       return;
@@ -6248,10 +6515,10 @@ var SequenceView = class extends import_obsidian9.BasesView {
     const colorPropId = this.config.getAsPropertyId("colorProp");
     const depPropRaw = this.config.get("dependencyProp");
     const depPropName = (depPropRaw == null ? void 0 : depPropRaw.trim()) || this.plugin.settings.dependencyProperty || "blocked-by";
-    const denseMode = (_g = this.config.get("denseMode")) != null ? _g : false;
+    const denseMode = (_h = this.config.get("denseMode")) != null ? _h : false;
     this._orderPropName = orderPropId ? orderPropId.replace(/^note\./, "") : "order";
     this._orderEndPropName = orderEndPropId ? orderEndPropId.replace(/^note\./, "") : null;
-    const groupedData = (_i = (_h = this.data) == null ? void 0 : _h.groupedData) != null ? _i : [];
+    const groupedData = (_j = (_i = this.data) == null ? void 0 : _i.groupedData) != null ? _j : [];
     const isGrouped = groupedData.length > 1 || groupedData.length === 1 && groupedData[0].hasKey();
     const savedCollapsed = this.config.get("collapsedGroups");
     if (savedCollapsed) this.collapsedGroups = new Set(savedCollapsed);
@@ -6344,7 +6611,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
     const containerWidth = this.rootEl.clientWidth || 800;
     const canvasWidth = Math.max(containerWidth, stepCount * STEP_WIDTH_PX);
     this.axis.setView(viewStart, viewEnd, canvasWidth);
-    const configLocked = (_j = this.config.get("locked")) != null ? _j : false;
+    const configLocked = (_k = this.config.get("locked")) != null ? _k : false;
     const autoLock = this.plugin.settings.lockOnMobile && isTouchDevice();
     this._locked = configLocked || autoLock;
     this.renderControls(sabidurianEntries.length);
@@ -6352,7 +6619,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
     const bodyContainerEl = this.rootEl.createDiv({ cls: "sabidurian-body-container" });
     const headerContainerEl = bodyContainerEl.createDiv({ cls: "sabidurian-header-container" });
     const isMobile = isMobileViewport();
-    const showTable = isMobile ? false : (_k = this.config.get("showTable")) != null ? _k : true;
+    const showTable = isMobile ? false : (_l = this.config.get("showTable")) != null ? _l : true;
     const savedTableWidth = this.config.get("tableWidth");
     const tableColumns = this.getTableColumns(orderPropId, orderEndPropId);
     if (showTable) {
@@ -6381,7 +6648,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
         this.plugin.app,
         savedTableWidth
       );
-      this.sideTableRenderer.propertyColors = (_l = this.plugin.settings.propertyColors) != null ? _l : {};
+      this.sideTableRenderer.propertyColors = (_m = this.plugin.settings.propertyColors) != null ? _m : {};
       if (isGrouped) {
         this.sideTableRenderer.renderGrouped(
           sabidurianGroups,
@@ -6410,7 +6677,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
     }
     this.timelineRenderer = new TimelineRenderer(contentEl);
     this.timelineRenderer.render(columns, this.axis, canvasHeight, false);
-    this._showArrows = (_m = this.config.get("showArrows")) != null ? _m : true;
+    this._showArrows = (_n = this.config.get("showArrows")) != null ? _n : true;
     this._isGrouped = isGrouped;
     this.allVisibleEntries = visibleEntries;
     this.cullingActive = visibleEntries.length > CULLING_THRESHOLD2;
@@ -6423,12 +6690,12 @@ var SequenceView = class extends import_obsidian9.BasesView {
     );
     this.barRenderer.sequenceMode = true;
     this.barRenderer.denseToSparse = this._denseToSparse;
-    this.barRenderer.propertyColors = (_n = this.plugin.settings.propertyColors) != null ? _n : {};
+    this.barRenderer.propertyColors = (_o = this.plugin.settings.propertyColors) != null ? _o : {};
     const barDisplayProps = [];
     for (const key of ["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"]) {
       const val = this.config.get(key);
       if (val) {
-        barDisplayProps.push(val.replace(/^note\./, ""));
+        barDisplayProps.push(val);
       }
     }
     this.barRenderer.setDisplayProps(
@@ -6436,7 +6703,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
       this.plugin.settings.barPropertyMinWidth,
       this.plugin.settings.showBarProperties
     );
-    const focusTagRaw = ((_o = this.config.get("focusTag")) == null ? void 0 : _o.trim()) || null;
+    const focusTagRaw = ((_p = this.config.get("focusTag")) == null ? void 0 : _p.trim()) || null;
     this.barRenderer.setFocusTag(focusTagRaw ? focusTagRaw.replace(/^#/, "") : null);
     if (isGrouped) {
       this.groupHeaderRenderer = new GroupHeaderRenderer(
@@ -6582,6 +6849,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
     }
     this.selectionManager = new SelectionManager(this.timelineRenderer.svgElement);
     this.selectionManager.attach(entriesToRender);
+    this.selectionManager.setSelectionChangeCallback(() => this.collaboration.changed());
     this.contextMenuManager = new ContextMenuManager(
       this.timelineRenderer.svgElement,
       this.plugin.app,
@@ -6679,6 +6947,26 @@ var SequenceView = class extends import_obsidian9.BasesView {
         });
       }
     }
+    this.collaboration.changed();
+  }
+  revealDiscussionTarget(target) {
+    var _a, _b, _c, _d;
+    if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) return "busy";
+    const matches = this.currentEntries.filter((entry2) => entry2.file === target.file);
+    if (matches.length > 1) return "ambiguous";
+    const entry = matches[0], body = (_a = this.timelineRenderer) == null ? void 0 : _a.element;
+    if (!entry || !body) return "unavailable";
+    if (entry.row < 0) return "hidden";
+    if (target.type === "cell" && (!this.plugin.settings.showBarProperties || !["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"].some((key) => this.config.get(key) === target.property))) return "property-hidden";
+    body.scrollLeft = Math.max(0, entry.x - Math.min(48, body.clientWidth / 4));
+    body.scrollTop = Math.max(0, this.layoutEngine.getRowY(entry.row) - 12);
+    (_b = this.headerRenderer) == null ? void 0 : _b.setScrollLeft(body.scrollLeft);
+    (_c = this.groupHeaderRenderer) == null ? void 0 : _c.setScrollLeft(body.scrollLeft);
+    this.lastViewportBounds = null;
+    if (this.cullingActive) this.renderVisibleBars();
+    if (target.type === "cell" && !((_d = this.barRenderer) == null ? void 0 : _d.collaborationHandles().some((handle) => handle.target.type === "cell" && handle.target.file === target.file && handle.target.property === target.property))) return "property-hidden";
+    this.collaboration.changed();
+    return "revealed";
   }
   // ─── Sequence-specific entry parsing ───
   parseSequenceEntries(entries, orderPropId, orderEndPropId, colorPropId, depPropName) {
@@ -6712,6 +7000,12 @@ var SequenceView = class extends import_obsidian9.BasesView {
             properties[name] = val.toString();
           }
         }
+      }
+      for (const key of ["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"]) {
+        const id = this.config.get(key);
+        if (!id) continue;
+        const value = entry.getValue(id);
+        properties[id.replace(/^note\./, "")] = value == null || String(value) === "null" ? "" : String(value);
       }
       const depVal = depPropName ? entry.getValue(depPropName) : null;
       const dependencies = this.resolveDependencies(depVal);
@@ -6921,10 +7215,12 @@ var SequenceView = class extends import_obsidian9.BasesView {
     this.sideTableRenderer = null;
   }
   onunload() {
-    var _a, _b;
-    (_a = this.plugin.colorSubscribers) == null ? void 0 : _a.delete(this.refreshColors);
+    var _a, _b, _c;
+    (_a = this.releaseCollaboration) == null ? void 0 : _a.call(this);
+    this.collaboration.dispose();
+    (_b = this.plugin.colorSubscribers) == null ? void 0 : _b.delete(this.refreshColors);
     this.destroyManagers();
-    (_b = this.rootEl) == null ? void 0 : _b.remove();
+    (_c = this.rootEl) == null ? void 0 : _c.remove();
     this.rootEl = null;
   }
 };
@@ -7360,6 +7656,7 @@ var SEQUENCE_VIEW_TYPE = "sabidurian-sequence";
 var SabidurianPlugin = class extends import_obsidian11.Plugin {
   constructor() {
     super(...arguments);
+    this.collaboration = new CollaborationBridge();
     this.colorSubscribers = /* @__PURE__ */ new Set();
     this.tableColors = /* @__PURE__ */ new Map();
     this.settings = { ...DEFAULT_SETTINGS };
@@ -7367,6 +7664,10 @@ var SabidurianPlugin = class extends import_obsidian11.Plugin {
   async onload() {
     await this.loadSettings();
     this.history = new EditHistory((file, mutate) => this.app.fileManager.processFrontMatter(file, mutate));
+    this.registerEvent(this.app.workspace.on("time-and-line:collaboration-request", (receive) => {
+      if (typeof receive === "function") receive(this.collaboration);
+    }));
+    this.app.workspace.trigger("time-and-line:collaboration-ready", this.collaboration);
     this.registerBasesView(SABIDURIAN_VIEW_TYPE, {
       name: "Timeline",
       icon: "lucide-chart-gantt",
@@ -7397,6 +7698,7 @@ var SabidurianPlugin = class extends import_obsidian11.Plugin {
     this.app.workspace.trigger("parse-style-settings");
   }
   onunload() {
+    this.collaboration.dispose();
     for (const colors of this.tableColors.values()) colors.destroy();
     this.tableColors.clear();
     this.colorSubscribers.clear();

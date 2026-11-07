@@ -10,7 +10,7 @@ root = Path(__file__).resolve().parents[1]
 manifest = json.loads((root/'manifest.json').read_text())
 imports = set(re.findall(r'\brequire\([\"\']([^\"\']+)[\"\']\)', (root/'main.js').read_text()))
 assert imports == {'obsidian'}, f'Unexpected runtime dependency: {imports}'
-names = ['main.js', 'manifest.json', 'styles.css', 'LICENSE', 'PLANNING.md', 'TESTING.md']
+names = ['main.js', 'manifest.json', 'styles.css', 'LICENSE', 'PLANNING.md', 'TESTING.md', 'COLLABORATION.md']
 files = {name:(root/name).read_bytes() for name in names}
 info = {'version':manifest['version'], 'upstream':'https://github.com/sabidurian/timeline-gantt-view', 'upstream_commit':'a554066bf9ace86fbf8042a31c36a72ecda522cb', 'runtime_imports':sorted(imports), 'files':{name:hashlib.sha256(data).hexdigest() for name,data in files.items()}}
 files['build-info.json'] = (json.dumps(info, indent=2)+'\n').encode()

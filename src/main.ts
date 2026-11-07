@@ -7,11 +7,13 @@ import { getSequenceViewOptions } from './sequenceViewOptions';
 import { SabidurianSettingTab, DEFAULT_SETTINGS, type SabidurianSettings } from './settings';
 import { NativeTableColors } from './renderer/NativeTableColors';
 import { getPropertyTone, normalizePropertyColors } from './utils/colorUtils';
+import { CollaborationBridge } from './collaboration/CollaborationBridge';
 
 const SABIDURIAN_VIEW_TYPE = 'sabidurian-timeline';
 const SEQUENCE_VIEW_TYPE = 'sabidurian-sequence';
 
 export default class SabidurianPlugin extends Plugin {
+  readonly collaboration = new CollaborationBridge();
   colorSubscribers = new Set<() => void>();
   private tableColors = new Map<Document, NativeTableColors>();
   history!: EditHistory;
@@ -20,6 +22,10 @@ export default class SabidurianPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     this.history = new EditHistory((file, mutate) => this.app.fileManager.processFrontMatter(file, mutate));
+    this.registerEvent(this.app.workspace.on('time-and-line:collaboration-request', (receive: unknown) => {
+      if (typeof receive === 'function') receive(this.collaboration);
+    }));
+    this.app.workspace.trigger('time-and-line:collaboration-ready', this.collaboration);
 
     // Timeline view (date-driven)
     this.registerBasesView(SABIDURIAN_VIEW_TYPE, {
@@ -56,6 +62,7 @@ export default class SabidurianPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.collaboration.dispose();
     for (const colors of this.tableColors.values()) colors.destroy();
     this.tableColors.clear(); this.colorSubscribers.clear();
   }

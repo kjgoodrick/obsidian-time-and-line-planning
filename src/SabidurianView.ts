@@ -3,6 +3,7 @@ import { fullLabel, dependencyLinks } from './model/labels';
 import { iconLabel, resolveTaskIcon } from './model/taskIcons';
 import { TaskInspector, TaskPicker, NewTaskModal, type TaskFields } from './interaction/TaskInspector';
 import { axisToWallMs, wallToInstant, offsetISO, instantToWallMs, wallMsToAxis } from './utils/timezone';
+import { TimelineSurface, type TimelineTarget, type TimelineReveal } from './collaboration/CollaborationBridge';
 import { BasesView, Notice, QueryController, setIcon } from 'obsidian';
 import type { BasesPropertyId, TFile } from 'obsidian';
 import type SabidurianPlugin from './main';
@@ -54,6 +55,8 @@ const SYSTEM_PROP_PREFIXES = ['file.', 'formula.'];
 
 export class SabidurianView extends BasesView {
   type = 'sabidurian-timeline';
+  readonly collaboration: TimelineSurface;
+  private releaseCollaboration?: () => void;
 
   private scrollEl: HTMLElement;
   private rootEl: HTMLElement | null = null;
@@ -123,6 +126,14 @@ export class SabidurianView extends BasesView {
     super(controller);
     this.scrollEl = scrollEl;
     this.plugin = plugin;
+    this.collaboration = new TimelineSurface({ owner: this, root: scrollEl,
+      viewport: () => this.timelineRenderer?.element,
+      handles: () => this.barRenderer?.collaborationHandles() ?? [],
+      hit: (node, point) => this.barRenderer?.collaborationHit(node, point),
+      selection: () => this.selectionManager?.getSelectedEntries().map(entry => entry.file) ?? [],
+      reveal: target => this.revealDiscussionTarget(target),
+    });
+    this.releaseCollaboration = plugin.collaboration?.register(this.collaboration);
     plugin.colorSubscribers?.add(this.refreshColors);
     // Show skeleton until first data arrives
     this.renderSkeleton();
@@ -140,6 +151,7 @@ export class SabidurianView extends BasesView {
       }
     }
     this.lockUpdateState = null;
+    this.barRenderer?.invalidateCollaboration(); this.collaboration.changed();
     // Preserve scroll position across re-renders
     const previous = this.pendingViewport ?? (this.timelineRenderer ? {
       year: this.axis.pixelToYear(this.timelineRenderer.element.scrollLeft),
@@ -428,8 +440,7 @@ export class SabidurianView extends BasesView {
     for (const key of ['barDisplayProp1', 'barDisplayProp2', 'barDisplayProp3']) {
       const val = this.config.get(key) as string | undefined;
       if (val) {
-        // Strip note. prefix from Bases property IDs
-        barDisplayProps.push(val.replace(/^note\./, ''));
+        barDisplayProps.push(val);
       }
     }
     this.barRenderer.setDisplayProps(
@@ -725,6 +736,7 @@ export class SabidurianView extends BasesView {
     // ── Selection manager ──
     this.selectionManager = new SelectionManager(this.timelineRenderer.svgElement);
     this.selectionManager.attach(entriesToRender);
+    this.selectionManager.setSelectionChangeCallback(() => this.collaboration.changed());
 
     // ── Context menus ──
     this.contextMenuManager = new ContextMenuManager(
@@ -805,6 +817,20 @@ export class SabidurianView extends BasesView {
 
     // Ensure today marker stays on top after bars are re-rendered
     this.timelineRenderer.raiseTodayMarker();
+    this.collaboration.changed();
+  }
+
+  private revealDiscussionTarget(target: TimelineTarget): TimelineReveal {
+    if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) return 'busy';
+    const matches = this.currentEntries.filter(entry => entry.file === target.file);
+    if (matches.length > 1) return 'ambiguous';
+    const entry = matches[0]; if (!entry || !this.timelineRenderer) return 'unavailable';
+    if (entry.row < 0) return 'hidden';
+    if (target.type === 'cell' && (!this.plugin.settings.showBarProperties || !['barDisplayProp1', 'barDisplayProp2', 'barDisplayProp3'].some(key => this.config.get(key) === target.property))) return 'property-hidden';
+    this.timelineRenderer.element.scrollTop = Math.max(0, this.layoutEngine.getRowY(entry.row) - 12);
+    this.jumpToTaskBoundary(entry, 'start');
+    if (target.type === 'cell' && !this.barRenderer?.collaborationHandles().some(handle => handle.target.type === 'cell' && handle.target.file === target.file && handle.target.property === target.property)) return 'property-hidden';
+    this.collaboration.changed(); return 'revealed';
   }
 
   /** Scroll the timeline to today's position. */
@@ -1438,6 +1464,7 @@ export class SabidurianView extends BasesView {
   }
 
   onunload(): void {
+    this.releaseCollaboration?.(); this.collaboration.dispose();
     this.measureManager?.destroy(); this.measureManager = null;
     this.taskEdges?.destroy(); this.taskEdges = null;
     this.plugin.colorSubscribers?.delete(this.refreshColors);

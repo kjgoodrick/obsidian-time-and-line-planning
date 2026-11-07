@@ -38,6 +38,8 @@ import { TouchManager } from './interaction/TouchManager';
 import { isTouchDevice, isMobileViewport, debounce } from './utils/debounce';
 import { ViewportCuller, type ViewportBounds } from './model/ViewportCuller';
 import { confirmAction } from './utils/confirmModal';
+import { TimelineSurface, type TimelineTarget, type TimelineReveal } from './collaboration/CollaborationBridge';
+import { TaskInspector } from './interaction/TaskInspector';
 
 const VIEW_PADDING = 0.5; // Half-step padding on each side
 const MIN_TIMELINE_HEIGHT = 200;
@@ -49,6 +51,8 @@ const STEP_WIDTH_PX = 100;
 
 export class SequenceView extends BasesView {
   type = 'sabidurian-sequence';
+  readonly collaboration: TimelineSurface;
+  private releaseCollaboration?: () => void;
 
   private scrollEl: HTMLElement;
   private rootEl: HTMLElement | null = null;
@@ -106,11 +110,20 @@ export class SequenceView extends BasesView {
     super(controller);
     this.scrollEl = scrollEl;
     this.plugin = plugin;
+    this.collaboration = new TimelineSurface({ owner: this, root: scrollEl,
+      viewport: () => this.timelineRenderer?.element,
+      handles: () => this.barRenderer?.collaborationHandles() ?? [],
+      hit: (node, point) => this.barRenderer?.collaborationHit(node, point),
+      selection: () => this.selectionManager?.getSelectedEntries().map(entry => entry.file) ?? [],
+      reveal: target => this.revealDiscussionTarget(target),
+    });
+    this.releaseCollaboration = plugin.collaboration?.register(this.collaboration);
     plugin.colorSubscribers?.add(this.refreshColors);
     this.renderSkeleton();
   }
 
   onDataUpdated(): void {
+    this.barRenderer?.invalidateCollaboration(); this.collaboration.changed();
     const prevScrollLeft = this.timelineRenderer?.element.scrollLeft ?? 0;
     const prevScrollTop = this.timelineRenderer?.element.scrollTop ?? 0;
 
@@ -361,7 +374,7 @@ export class SequenceView extends BasesView {
     for (const key of ['barDisplayProp1', 'barDisplayProp2', 'barDisplayProp3']) {
       const val = this.config.get(key) as string | undefined;
       if (val) {
-        barDisplayProps.push(val.replace(/^note\./, ''));
+        barDisplayProps.push(val);
       }
     }
     this.barRenderer.setDisplayProps(
@@ -541,6 +554,7 @@ export class SequenceView extends BasesView {
     // Selection
     this.selectionManager = new SelectionManager(this.timelineRenderer.svgElement);
     this.selectionManager.attach(entriesToRender);
+    this.selectionManager.setSelectionChangeCallback(() => this.collaboration.changed());
 
     // Context menus (sequence variant — no "Jump to today", no scale change)
     this.contextMenuManager = new ContextMenuManager(
@@ -644,6 +658,23 @@ export class SequenceView extends BasesView {
         });
       }
     }
+    this.collaboration.changed();
+  }
+
+  private revealDiscussionTarget(target: TimelineTarget): TimelineReveal {
+    if (TaskInspector.hasDirty(this.scrollEl.ownerDocument)) return 'busy';
+    const matches = this.currentEntries.filter(entry => entry.file === target.file);
+    if (matches.length > 1) return 'ambiguous';
+    const entry = matches[0], body = this.timelineRenderer?.element;
+    if (!entry || !body) return 'unavailable';
+    if (entry.row < 0) return 'hidden';
+    if (target.type === 'cell' && (!this.plugin.settings.showBarProperties || !['barDisplayProp1', 'barDisplayProp2', 'barDisplayProp3'].some(key => this.config.get(key) === target.property))) return 'property-hidden';
+    body.scrollLeft = Math.max(0, entry.x - Math.min(48, body.clientWidth / 4));
+    body.scrollTop = Math.max(0, this.layoutEngine.getRowY(entry.row) - 12);
+    this.headerRenderer?.setScrollLeft(body.scrollLeft); this.groupHeaderRenderer?.setScrollLeft(body.scrollLeft);
+    this.lastViewportBounds = null; if (this.cullingActive) this.renderVisibleBars();
+    if (target.type === 'cell' && !this.barRenderer?.collaborationHandles().some(handle => handle.target.type === 'cell' && handle.target.file === target.file && handle.target.property === target.property)) return 'property-hidden';
+    this.collaboration.changed(); return 'revealed';
   }
 
   // ─── Sequence-specific entry parsing ───
@@ -700,6 +731,13 @@ export class SequenceView extends BasesView {
             properties[name] = val.toString();
           }
         }
+      }
+
+      for (const key of ['barDisplayProp1', 'barDisplayProp2', 'barDisplayProp3']) {
+        const id = this.config.get(key) as BasesPropertyId | undefined;
+        if (!id) continue;
+        const value = entry.getValue(id);
+        properties[id.replace(/^note\./, '')] = value == null || String(value) === 'null' ? '' : String(value);
       }
 
       // Dependencies
@@ -930,6 +968,7 @@ export class SequenceView extends BasesView {
   }
 
   onunload(): void {
+    this.releaseCollaboration?.(); this.collaboration.dispose();
     this.plugin.colorSubscribers?.delete(this.refreshColors);
     this.destroyManagers();
     this.rootEl?.remove();

@@ -129,6 +129,15 @@ bounded editable draft, not a committed annotation; ambiguous DST times retain
 an explicit issue requiring offset confirmation. Consumer cancellation must
 suppress late callbacks, while ordinary provider cleanup may precede delivery.
 
+The optional `range-points` capability adds a fifth `point = false` argument to
+`beginRange`. With `true`, one click/tap or Enter/Space returns identical closed
+endpoints for a marker position. A mouse drag chooses its release position only
+after consuming the compatibility click; touch pan/pinch do not choose a point.
+Both selection modes provide a visible **Cancel selection** button. This remains
+an editable draft, including historical precision and ambiguous-time issues;
+the consumer must separately review and save it. Older consumers retain their
+two-endpoint behavior and older providers retain manual point entry.
+
 Coordinates reuse the server/client version-one corpus. Calendar and historical
 closed endpoints cover the whole stated period. Historical years use arithmetic
 Gregorian periods, including astronomical year zero, without Date limits.

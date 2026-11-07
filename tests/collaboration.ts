@@ -445,6 +445,63 @@ test('range mouse drag consumes its compatibility click before returning control
   assert.equal(JSON.stringify(f.configWrites), before); assert.equal(f.writes.length, 0);
 });
 
+for (const method of ['click', 'tap', 'keyboard', 'drag'] as const) {
+  test(`point selection: ${method} chooses one closed coordinate without delivering a task gesture`, () => {
+    const f = fixture('sequence'), { svg } = rangeLayout(f), selections: any[] = []; let normalClicks = 0, stopped = 0;
+    svg.addEventListener('click', () => normalClicks++); const before = JSON.stringify(f.configWrites);
+    assert.ok(f.surface.capabilities.includes('range-points'));
+    f.surface.beginRange('ordinal', 'day', (value: any) => selections.push(value), () => stopped++, true);
+    const status = document.querySelector('.sabidurian-range-selection-status')!;
+    assert.match(status.textContent!, /Position:/); assert.equal(status.getAttribute('aria-label'), 'Select a marker position');
+    if (method === 'keyboard') {
+      status.dispatchEvent(new win.KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'ArrowRight' }));
+      status.dispatchEvent(new win.KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter' }));
+    } else {
+      const type = method === 'tap' ? 'touch' : 'mouse';
+      rangePointer(svg, 'pointerdown', method === 'drag' ? 100 : 400, 100, type);
+      if (method === 'drag') rangePointer(document, 'pointermove', 400);
+      rangePointer(document, 'pointerup', 400, 100, type);
+      assert.equal(selections.length, 0);
+      svg.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true, clientX: 400 }));
+    }
+    assert.equal(selections.length, 1); assert.equal(stopped, 1); assert.equal(normalClicks, 0);
+    assert.equal(selections[0].draft.start, selections[0].draft.end);
+    assert.equal(selections[0].draft.start, method === 'keyboard' ? '2.02' : '2.5');
+    assert.equal(selections[0].draft.start_inclusive, true); assert.equal(selections[0].draft.end_inclusive, true);
+    assert.equal(document.querySelector('.sabidurian-range-selection-status'), null);
+    assert.equal(JSON.stringify(f.configWrites), before); assert.equal(f.writes.length, 0);
+  });
+}
+
+test('point selection preserves touch pan and pinch, offers tap cancellation, and releases task interception', () => {
+  const f = fixture('sequence'), { svg } = rangeLayout(f); let stopped = 0, normalClicks = 0;
+  svg.addEventListener('click', () => normalClicks++);
+  f.surface.beginRange('ordinal', 'day', () => assert.fail('pan selected a point'), () => stopped++, true);
+  assert.equal(rangePointer(svg, 'pointerdown', 100, 100, 'touch').defaultPrevented, false);
+  assert.equal(rangePointer(document, 'pointermove', 300, 100, 'touch').defaultPrevented, false);
+  rangePointer(document, 'pointerup', 300, 100, 'touch');
+  svg.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true, clientX: 300 }));
+  rangePointer(svg, 'pointerdown', 200, 100, 'touch', 2); rangePointer(svg, 'pointerdown', 300, 100, 'touch', 3);
+  rangePointer(document, 'pointerup', 200, 100, 'touch', 2); rangePointer(document, 'pointerup', 300, 100, 'touch', 3);
+  svg.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true, clientX: 300 }));
+  assert.equal(stopped, 0); assert.equal(normalClicks, 0);
+  document.querySelector<HTMLButtonElement>('.sabidurian-range-selection-status button')!.click();
+  assert.equal(stopped, 1); assert.equal(document.querySelector('.sabidurian-comment-range-selection'), null);
+  svg.dispatchEvent(new win.MouseEvent('click', { bubbles: true, clientX: 300 })); assert.equal(normalClicks, 1);
+});
+
+for (const kind of ['calendar', 'instant', 'historical'] as const) {
+  test(`${kind}: point selection retains coordinate semantics and invalidates after view unload`, () => {
+    const f = fixture('timeline'); rangeLayout(f); let selected: any;
+    f.surface.beginRange(kind, 'month', (value: any) => { selected = value; }, () => {}, true);
+    document.querySelector('.sabidurian-range-selection-status')!.dispatchEvent(new win.KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter' }));
+    assert.ok(selected?.current()); assert.deepEqual(selected.draft.start, selected.draft.end);
+    assert.equal(parseTimelineRange(selected.draft).kind, kind);
+    if (kind === 'historical') assert.equal(selected.draft.start.precision, 'month');
+    f.view.onunload(); assert.equal(selected.current(), false); assert.equal(f.writes.length, 0);
+  });
+}
+
 test('touch pan and pinch retain native defaults and the next two taps select a range', () => {
   const f = fixture('sequence'), { svg } = rangeLayout(f), selections: any[] = [];
   f.surface.beginRange('ordinal', 'day', (value: any) => selections.push(value), () => {});

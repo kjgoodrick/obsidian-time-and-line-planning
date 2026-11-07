@@ -5,7 +5,7 @@ import { parseTimelineRange, timelineRangeLabel, type HistoricalPoint } from './
  * Touch keeps native pan/pinch. No handler writes configuration or schedules. */
 export function beginRangeInteraction(root: HTMLElement, read: () => RangeState | undefined, context: RangeContext,
   kind: RangeKind, precision: HistoricalPoint['precision'], select: (selection: RangeSelection) => void,
-  stopped: () => void): (() => void) | undefined {
+  stopped: () => void, point = false): (() => void) | undefined {
   const state = read(); if (!state || !context.current() || !context.kinds.includes(kind) || !['year', 'month', 'day'].includes(precision)) return;
   const cleanup: (() => void)[] = [], doc = root.ownerDocument;
   let live = true, first: number | undefined, cursor = (state.viewport.scrollLeft + state.viewport.clientWidth / 2), suppressClick = false;
@@ -13,9 +13,11 @@ export function beginRangeInteraction(root: HTMLElement, read: () => RangeState 
   let gesture: { id: number; touch: boolean; x: number; y: number; position: number; dragged: boolean } | undefined;
   const pointers = new Set<number>();
   const status = doc.createElement('div'); status.className = 'sabidurian-range-selection-status';
-  status.tabIndex = 0; status.setAttribute('role', 'group'); status.setAttribute('aria-label', 'Select a comment range');
-  status.textContent = 'Choose two endpoints, or drag with a mouse. Arrow keys move; Enter chooses an endpoint. Escape cancels. Touch drag pans.';
+  status.tabIndex = 0; status.setAttribute('role', 'group'); status.setAttribute('aria-label', point ? 'Select a marker position' : 'Select a comment range');
+  status.textContent = point ? 'Click or tap a position. Arrow keys move; Enter chooses the position. Escape cancels. Touch drag pans.' :
+    'Choose two endpoints, or drag with a mouse. Arrow keys move; Enter chooses an endpoint. Escape cancels. Touch drag pans.';
   const feedback = doc.createElement('span'); feedback.setAttribute('role', 'status'); status.append(feedback); root.append(status);
+  const cancel = doc.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel selection'; status.append(cancel);
   const overlay = doc.createElementNS('http://www.w3.org/2000/svg', 'g'); overlay.classList.add('sabidurian-comment-range-selection');
   overlay.setAttribute('pointer-events', 'none'); state.svg.append(overlay);
   const priorFocus = doc.activeElement as HTMLElement | null;
@@ -30,25 +32,26 @@ export function beginRangeInteraction(root: HTMLElement, read: () => RangeState 
     try { stopped(); } catch { /* Always remove editing interception. */ }
   };
   const current = () => live && context.current();
+  cancel.onclick = stop;
   const local = (x: number) => {
     const box = state.svg.getBoundingClientRect();
     return Math.max(0, Math.min(state.axis.totalWidth, (x - box.left) * state.axis.totalWidth / box.width));
   };
   const paint = () => {
     overlay.replaceChildren();
-    for (const x of first === undefined ? [cursor] : [first, cursor]) {
+    for (const x of point || first === undefined ? [cursor] : [first, cursor]) {
       const line = doc.createElementNS('http://www.w3.org/2000/svg', 'line');
       line.setAttribute('x1', String(x)); line.setAttribute('x2', String(x)); line.setAttribute('y1', '0');
       line.setAttribute('y2', String(state.svg.getAttribute('height') ?? '200'));
       overlay.append(line);
     }
-    const point = state.axis.pixelToYear(cursor), preview = draftRange(point, point, state, kind, precision);
-    feedback.textContent = (first === undefined ? ' Start: ' : ' End: ') + (preview.issue ?? (preview.draft ? timelineRangeLabel(parseTimelineRange(preview.draft)) : 'Enter an endpoint.'));
+    const coordinate = state.axis.pixelToYear(cursor), preview = draftRange(coordinate, coordinate, state, kind, precision);
+    feedback.textContent = (point ? ' Position: ' : first === undefined ? ' Start: ' : ' End: ') + (preview.issue ?? (preview.draft ? timelineRangeLabel(parseTimelineRange(preview.draft)) : 'Enter an endpoint.'));
   };
   const choose = (position: number) => {
     if (!current() || !Number.isFinite(position)) { stop(); return; }
-    if (first === undefined) { first = position; cursor = position; paint(); return; }
-    const result = draftRange(state.axis.pixelToYear(first), state.axis.pixelToYear(position), state, kind, precision);
+    if (!point && first === undefined) { first = position; cursor = position; paint(); return; }
+    const result = draftRange(state.axis.pixelToYear(point ? position : first!), state.axis.pixelToYear(position), state, kind, precision);
     const selection: RangeSelection = { ...result, context, current: () => context.current() };
     stop(); select(selection);
   };
@@ -106,7 +109,7 @@ export function beginRangeInteraction(root: HTMLElement, read: () => RangeState 
   });
   listen(root, 'keydown', event => {
     const key = event as KeyboardEvent;
-    if (key.key === 'Tab') return;
+    if (key.key === 'Tab' || event.target === cancel && (key.key === 'Enter' || key.key === ' ')) return;
     event.preventDefault(); event.stopImmediatePropagation();
     if (key.key === 'Escape') { stop(); return; }
     if (!current()) { stop(); return; }

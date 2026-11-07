@@ -1172,7 +1172,7 @@ function draftRange(start, end, state, kind, precision = "day") {
 }
 
 // src/collaboration/RangeInteraction.ts
-function beginRangeInteraction(root, read, context, kind, precision, select, stopped) {
+function beginRangeInteraction(root, read, context, kind, precision, select, stopped, point = false) {
   const state = read();
   if (!state || !context.current() || !context.kinds.includes(kind) || !["year", "month", "day"].includes(precision)) return;
   const cleanup = [], doc = root.ownerDocument;
@@ -1184,12 +1184,16 @@ function beginRangeInteraction(root, read, context, kind, precision, select, sto
   status.className = "sabidurian-range-selection-status";
   status.tabIndex = 0;
   status.setAttribute("role", "group");
-  status.setAttribute("aria-label", "Select a comment range");
-  status.textContent = "Choose two endpoints, or drag with a mouse. Arrow keys move; Enter chooses an endpoint. Escape cancels. Touch drag pans.";
+  status.setAttribute("aria-label", point ? "Select a marker position" : "Select a comment range");
+  status.textContent = point ? "Click or tap a position. Arrow keys move; Enter chooses the position. Escape cancels. Touch drag pans." : "Choose two endpoints, or drag with a mouse. Arrow keys move; Enter chooses an endpoint. Escape cancels. Touch drag pans.";
   const feedback = doc.createElement("span");
   feedback.setAttribute("role", "status");
   status.append(feedback);
   root.append(status);
+  const cancel = doc.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel selection";
+  status.append(cancel);
   const overlay = doc.createElementNS("http://www.w3.org/2000/svg", "g");
   overlay.classList.add("sabidurian-comment-range-selection");
   overlay.setAttribute("pointer-events", "none");
@@ -1214,6 +1218,7 @@ function beginRangeInteraction(root, read, context, kind, precision, select, sto
     }
   };
   const current = () => live && context.current();
+  cancel.onclick = stop;
   const local = (x) => {
     const box = state.svg.getBoundingClientRect();
     return Math.max(0, Math.min(state.axis.totalWidth, (x - box.left) * state.axis.totalWidth / box.width));
@@ -1221,7 +1226,7 @@ function beginRangeInteraction(root, read, context, kind, precision, select, sto
   const paint = () => {
     var _a, _b;
     overlay.replaceChildren();
-    for (const x of first === void 0 ? [cursor] : [first, cursor]) {
+    for (const x of point || first === void 0 ? [cursor] : [first, cursor]) {
       const line = doc.createElementNS("http://www.w3.org/2000/svg", "line");
       line.setAttribute("x1", String(x));
       line.setAttribute("x2", String(x));
@@ -1229,21 +1234,21 @@ function beginRangeInteraction(root, read, context, kind, precision, select, sto
       line.setAttribute("y2", String((_a = state.svg.getAttribute("height")) != null ? _a : "200"));
       overlay.append(line);
     }
-    const point = state.axis.pixelToYear(cursor), preview = draftRange(point, point, state, kind, precision);
-    feedback.textContent = (first === void 0 ? " Start: " : " End: ") + ((_b = preview.issue) != null ? _b : preview.draft ? timelineRangeLabel(parseTimelineRange(preview.draft)) : "Enter an endpoint.");
+    const coordinate = state.axis.pixelToYear(cursor), preview = draftRange(coordinate, coordinate, state, kind, precision);
+    feedback.textContent = (point ? " Position: " : first === void 0 ? " Start: " : " End: ") + ((_b = preview.issue) != null ? _b : preview.draft ? timelineRangeLabel(parseTimelineRange(preview.draft)) : "Enter an endpoint.");
   };
   const choose = (position) => {
     if (!current() || !Number.isFinite(position)) {
       stop();
       return;
     }
-    if (first === void 0) {
+    if (!point && first === void 0) {
       first = position;
       cursor = position;
       paint();
       return;
     }
-    const result = draftRange(state.axis.pixelToYear(first), state.axis.pixelToYear(position), state, kind, precision);
+    const result = draftRange(state.axis.pixelToYear(point ? position : first), state.axis.pixelToYear(position), state, kind, precision);
     const selection = { ...result, context, current: () => context.current() };
     stop();
     select(selection);
@@ -1342,7 +1347,7 @@ function beginRangeInteraction(root, read, context, kind, precision, select, sto
   });
   listen(root, "keydown", (event) => {
     const key = event;
-    if (key.key === "Tab") return;
+    if (key.key === "Tab" || event.target === cancel && (key.key === "Enter" || key.key === " ")) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     if (key.key === "Escape") {
@@ -1602,7 +1607,7 @@ var TimelineSurface = class {
   constructor(port) {
     this.port = port;
     this.protocolVersion = 1;
-    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal", "annotation", "groups", "ranges", "range-presence", "local-markers"]);
+    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal", "annotation", "groups", "ranges", "range-points", "range-presence", "local-markers"]);
     this.listeners = /* @__PURE__ */ new Set();
     this.closed = false;
     this.serial = 0;
@@ -1835,9 +1840,9 @@ var TimelineSurface = class {
       return "unavailable";
     }
   }
-  beginRange(kind, precision, select, stopped) {
+  beginRange(kind, precision, select, stopped, point = false) {
     var _a, _b;
-    if (TaskInspector.hasDirty(this.root.ownerDocument)) return;
+    if (typeof point !== "boolean" || TaskInspector.hasDirty(this.root.ownerDocument)) return;
     (_a = this.stopAnnotation) == null ? void 0 : _a.call(this);
     (_b = this.stopRange) == null ? void 0 : _b.call(this);
     const context = this.rangeContext();
@@ -1859,7 +1864,8 @@ var TimelineSurface = class {
         this.stopRange = void 0;
         this.activeRange = void 0;
         stopped();
-      }
+      },
+      point
     );
     this.stopRange = stop;
     if (!stop) this.activeRange = void 0;

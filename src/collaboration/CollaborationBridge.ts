@@ -67,7 +67,7 @@ export interface TimelineRangePresence {
 /** One lifetime per Bases view, retained across renderer replacement. */
 export class TimelineSurface {
   readonly protocolVersion = 1;
-  readonly capabilities = Object.freeze(['item', 'cell', 'selection', 'geometry', 'reveal', 'annotation', 'groups', 'ranges', 'range-presence', 'local-markers'] as const);
+  readonly capabilities = Object.freeze(['item', 'cell', 'selection', 'geometry', 'reveal', 'annotation', 'groups', 'ranges', 'range-points', 'range-presence', 'local-markers'] as const);
   private listeners = new Set<() => void>();
   private closed = false;
   private serial = 0;
@@ -231,14 +231,14 @@ export class TimelineSurface {
       this.changed(); return 'revealed';
     } catch { return 'unavailable'; }
   }
-  beginRange(kind: RangeKind, precision: HistoricalPoint['precision'], select: (selection: RangeSelection) => void, stopped: () => void): (() => void) | undefined {
-    if (TaskInspector.hasDirty(this.root.ownerDocument)) return;
+  beginRange(kind: RangeKind, precision: HistoricalPoint['precision'], select: (selection: RangeSelection) => void, stopped: () => void, point = false): (() => void) | undefined {
+    if (typeof point !== 'boolean' || TaskInspector.hasDirty(this.root.ownerDocument)) return;
     this.stopAnnotation?.(); this.stopRange?.();
     const context = this.rangeContext(); if (!context) return;
     this.activeRange = context;
     const stop = beginRangeInteraction(this.root, () => this.current() && !TaskInspector.hasDirty(this.root.ownerDocument) ? this.port.ranges?.() : undefined,
       context, kind, precision, selection => { if (selection.current() && !TaskInspector.hasDirty(this.root.ownerDocument)) select(selection); },
-      () => { this.stopRange = undefined; this.activeRange = undefined; stopped(); });
+      () => { this.stopRange = undefined; this.activeRange = undefined; stopped(); }, point);
     this.stopRange = stop; if (!stop) this.activeRange = undefined; return stop;
   }
   /** Explicit one-shot selection mode. Touch keeps native pan/zoom; schedule

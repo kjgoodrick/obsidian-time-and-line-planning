@@ -1057,6 +1057,28 @@ function ordinalPixel(value, state) {
   if (end <= start) throw new Error("Sequence precision is unavailable.");
   return Number(target - start) / Number(end - start) * state.axis.totalWidth;
 }
+function ordinalValue(pixel, state) {
+  let before, after, ratio;
+  if (state.denseValues) {
+    const dense = state.denseValues, position = state.axis.pixelToYear(pixel) - 1;
+    if (!dense.length || dense.length > 2e4 || position < 0 || position > dense.length - 1) throw new Error("Outside occupied Sequence positions.");
+    const index = Math.floor(position);
+    before = decimal2(numberDecimal(dense[index]));
+    after = decimal2(numberDecimal(dense[Math.min(index + 1, dense.length - 1)]));
+    ratio = position - index;
+    if (after < before) throw new Error("Ambiguous Sequence mapping.");
+  } else {
+    before = decimal2(numberDecimal(state.axis.viewStart));
+    after = decimal2(numberDecimal(state.axis.viewEnd));
+    ratio = pixel / state.axis.totalWidth;
+  }
+  if (!Number.isFinite(ratio) || ratio < 0 || ratio > 1 || after < before) throw new Error("Invalid Sequence position.");
+  const denominator = BigInt(1e12), value = before + (after - before) * BigInt(Math.round(ratio * Number(denominator))) / denominator;
+  const absolute = value < 0 ? -value : value;
+  const result = `${value < 0 ? "-" : ""}${absolute / scale}.${String(absolute % scale).padStart(9, "0")}`;
+  if (Math.abs(ordinalPixel(result, state) - pixel) > 0.1) throw new Error("Sequence position exceeds supported precision.");
+  return result;
+}
 function checkedRange(input, state, expected) {
   var _a;
   const range = parseTimelineRange(input), descriptor = axisDescriptor(state);
@@ -1477,12 +1499,46 @@ function annotationPicker(root, read, choose, cancel) {
   };
 }
 
+// src/collaboration/RangePresence.ts
+function presenceRange(start, end, state) {
+  try {
+    if (![start, end].every(Number.isFinite) || start < 0 || end < start || end > state.axis.totalWidth) return;
+    let range;
+    if (state.renderer === "sabidurian-sequence") {
+      range = parseTimelineRange({
+        version: 1,
+        kind: "ordinal",
+        start: ordinalValue(start, state),
+        end: ordinalValue(end, state),
+        start_inclusive: true,
+        end_inclusive: true,
+        unit: "property-value"
+      });
+    } else {
+      const a = state.axis.pixelToYear(start), b = state.axis.pixelToYear(end);
+      const kind = a >= 1 && b < 1e4 ? "instant" : "historical";
+      const draft = draftRange(a, b, state, kind, "day");
+      if (draft.issue || !draft.draft) return;
+      range = parseTimelineRange(draft.draft);
+    }
+    const axis = axisDescriptor(state);
+    if (!axis) return;
+    const projected = projectRange(range, state, axis);
+    if (projected.end < projected.start || projected.discontinuous && projected.end === projected.start) return;
+    if (range.kind !== "historical" && (Math.abs(projected.start - start) > 0.1 || Math.abs(projected.end - end) > 0.1)) return;
+    return range;
+  } catch (e) {
+    return;
+  }
+}
+
 // src/collaboration/CollaborationBridge.ts
+var validOffset = (offset) => offset && [offset.x, offset.y].every((value) => Number.isFinite(value) && value >= 0 && value <= 1);
 var TimelineSurface = class {
   constructor(port) {
     this.port = port;
     this.protocolVersion = 1;
-    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal", "annotation", "groups", "ranges"]);
+    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal", "annotation", "groups", "ranges", "range-presence"]);
     this.listeners = /* @__PURE__ */ new Set();
     this.closed = false;
     this.serial = 0;
@@ -1567,6 +1623,69 @@ var TimelineSurface = class {
       return this.current() ? (_b = (_a = this.port).ranges) == null ? void 0 : _b.call(_a) : void 0;
     }) : void 0;
   }
+  /** Passive capture. No annotation gesture, task read, selection or saved write. */
+  rangePresence(point) {
+    var _a, _b, _c, _d, _e, _f, _g, _h;
+    try {
+      if (((_b = (_a = this.port).targetsCurrent) == null ? void 0 : _b.call(_a)) === false) return;
+      const context = this.rangeContext(), state = (_d = (_c = this.port).ranges) == null ? void 0 : _d.call(_c);
+      if (!context || !state) return;
+      const svg = state.svg.getBoundingClientRect(), view = state.viewport.getBoundingClientRect();
+      const left = Math.max(svg.left, view.left), right = Math.min(svg.right, view.right), top = Math.max(svg.top, view.top), bottom = Math.min(svg.bottom, view.bottom);
+      if (![left, right, top, bottom].every(Number.isFinite) || right <= left || bottom <= top) return;
+      const x = (_e = point == null ? void 0 : point.clientX) != null ? _e : (left + right) / 2, y = (_f = point == null ? void 0 : point.clientY) != null ? _f : (top + bottom) / 2;
+      if (![x, y].every(Number.isFinite) || x < left || x > right || y < top || y > bottom) return;
+      const lanes = this.groups().filter((handle) => {
+        var _a2;
+        const band = handle.current() && ((_a2 = handle.band) == null ? void 0 : _a2.call(handle));
+        return band && y >= band.top && y < band.bottom;
+      });
+      if (lanes.length > 1) return;
+      const group = (_h = (_g = lanes[0]) == null ? void 0 : _g.target.group) != null ? _h : null;
+      const local = (value) => Math.max(0, Math.min(state.axis.totalWidth, (value - svg.left) / svg.width * state.axis.totalWidth));
+      const range = presenceRange(local(point ? x : left), local(point ? x : right), state);
+      if (!range) return;
+      const geometry = this.rangePresenceGeometry(range, context.axis, group != null ? group : void 0);
+      if (!geometry) return;
+      const width = geometry.endX - geometry.startX, height = geometry.bottom - geometry.top;
+      const offset = { x: width > 0 ? Math.max(0, Math.min(1, (x - geometry.startX) / width)) : 0.5, y: (y - geometry.top) / height };
+      if (!validOffset(offset)) return;
+      return { context, range, group, offset, current: () => context.current() && geometry.current() };
+    } catch (e) {
+      return;
+    }
+  }
+  rangePresenceGeometry(range, axis, group) {
+    var _a, _b, _c, _d, _e, _f, _g, _h;
+    try {
+      if (((_b = (_a = this.port).targetsCurrent) == null ? void 0 : _b.call(_a)) === false) return;
+      const context = this.rangeContext(), state = (_d = (_c = this.port).ranges) == null ? void 0 : _d.call(_c);
+      if (!context || !state) return;
+      const projected = projectRange(range, state, axis), svg = state.svg.getBoundingClientRect(), view = state.viewport.getBoundingClientRect();
+      const matrixValues = () => {
+        var _a2, _b2;
+        const matrix2 = (_b2 = (_a2 = state.svg).getScreenCTM) == null ? void 0 : _b2.call(_a2);
+        return matrix2 && [matrix2.a, matrix2.b, matrix2.c, matrix2.d, matrix2.e, matrix2.f];
+      };
+      const matrix = matrixValues();
+      if (typeof state.svg.getScreenCTM === "function" && (!matrix || !matrix.every(Number.isFinite) || matrix[0] <= 0 || matrix[3] <= 0 || matrix[1] !== 0 || matrix[2] !== 0)) return;
+      const lanes = group ? this.groups().filter((handle) => handle.target.group === group && handle.current()) : [];
+      if (group && lanes.length !== 1) return;
+      const band = (_f = (_e = lanes[0]) == null ? void 0 : _e.band) == null ? void 0 : _f.call(_e);
+      if (group && !band) return;
+      const top = (_g = band == null ? void 0 : band.top) != null ? _g : svg.top, bottom = (_h = band == null ? void 0 : band.bottom) != null ? _h : svg.bottom;
+      const startX = svg.left + projected.start / state.axis.totalWidth * svg.width, endX = svg.left + projected.end / state.axis.totalWidth * svg.width;
+      if (svg.width <= 0 || bottom <= top || projected.end < projected.start || projected.discontinuous && projected.end === projected.start || ![startX, endX, top, bottom].every(Number.isFinite)) return;
+      const serial = this.serial;
+      return { startX, endX, top, bottom, discontinuous: projected.discontinuous, current: () => {
+        var _a2, _b2, _c2, _d2;
+        const now = state.svg.getBoundingClientRect(), viewport = state.viewport.getBoundingClientRect(), lane = (_b2 = (_a2 = lanes[0]) == null ? void 0 : _a2.band) == null ? void 0 : _b2.call(_a2);
+        return this.serial === serial && ((_d2 = (_c2 = this.port).targetsCurrent) == null ? void 0 : _d2.call(_c2)) !== false && context.current() && JSON.stringify(matrixValues()) === JSON.stringify(matrix) && now.left === svg.left && now.top === svg.top && now.width === svg.width && now.height === svg.height && viewport.left === view.left && viewport.top === view.top && viewport.width === view.width && viewport.height === view.height && (!lanes[0] || lanes[0].current() && (lane == null ? void 0 : lane.top) === top && (lane == null ? void 0 : lane.bottom) === bottom);
+      } };
+    } catch (e) {
+      return;
+    }
+  }
   rangeGeometry(range, axis, group) {
     var _a, _b, _c, _d, _e;
     try {
@@ -1593,12 +1712,21 @@ var TimelineSurface = class {
     }
   }
   revealRange(range, axis, group) {
+    return this.navigateRange(range, axis, group);
+  }
+  revealRangePresence(range, axis, offset, group) {
+    var _a, _b;
+    if (!validOffset(offset) || ((_b = (_a = this.port).targetsCurrent) == null ? void 0 : _b.call(_a)) === false) return "unavailable";
+    return this.navigateRange(range, axis, group, offset);
+  }
+  navigateRange(range, axis, group, offset) {
     var _a, _b, _c, _d, _e, _f, _g, _h;
     if (TaskInspector.hasDirty(this.root.ownerDocument)) return "busy";
     try {
       let context = this.rangeContext(), state = (_b = (_a = this.port).ranges) == null ? void 0 : _b.call(_a);
       if (!context || !state) return "unavailable";
-      rangeExtent(range, state, axis);
+      const extent = rangeExtent(range, state, axis);
+      if (offset && (extent.end < extent.start || extent.discontinuous && extent.end === extent.start)) return "unavailable";
       if (group) {
         const lanes = this.groups().filter((handle) => handle.current() && handle.target.group === group);
         if (lanes.length !== 1) return lanes.length ? "ambiguous" : "unavailable";
@@ -1615,13 +1743,21 @@ var TimelineSurface = class {
         if (!context || !state) return "unavailable";
         projected = projectRange(range, state, axis);
       }
+      const geometry = offset ? this.rangePresenceGeometry(range, axis, group) : void 0;
+      if (offset && !geometry) return "unavailable";
       const start = Math.min(projected.start, projected.end);
-      if (group) {
+      if (group && !offset) {
         const result = this.revealGroup(group);
         if (result !== "revealed") return result;
       }
       if (!context.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return "busy";
-      state.viewport.scrollLeft = Math.max(0, Math.min(start - Math.min(48, state.viewport.clientWidth / 4), Math.max(0, state.viewport.scrollWidth - state.viewport.clientWidth)));
+      if (offset && geometry) {
+        const view = state.viewport.getBoundingClientRect(), sx = view.width / state.viewport.clientWidth, sy = view.height / state.viewport.clientHeight;
+        if (![sx, sy].every((value) => Number.isFinite(value) && value > 0) || !geometry.current()) return "unavailable";
+        const x = geometry.startX + (geometry.endX - geometry.startX) * offset.x, y = geometry.top + (geometry.bottom - geometry.top) * offset.y;
+        state.viewport.scrollLeft = Math.max(0, Math.min(state.viewport.scrollLeft + (x - view.left - view.width / 2) / sx, Math.max(0, state.viewport.scrollWidth - state.viewport.clientWidth)));
+        state.viewport.scrollTop = Math.max(0, Math.min(state.viewport.scrollTop + (y - view.top - view.height / 2) / sy, Math.max(0, state.viewport.scrollHeight - state.viewport.clientHeight)));
+      } else state.viewport.scrollLeft = Math.max(0, Math.min(start - Math.min(48, state.viewport.clientWidth / 4), Math.max(0, state.viewport.scrollWidth - state.viewport.clientWidth)));
       (_h = (_g = this.port).rangeScrolled) == null ? void 0 : _h.call(_g);
       this.changed();
       return "revealed";
@@ -3185,6 +3321,11 @@ var GroupHeaderRenderer = class {
       if (group && element.isConnected) handles.push({
         target: { type: "group", group },
         element,
+        band: () => {
+          const rect = this.svg.getBoundingClientRect(), height = Number(this.svg.getAttribute("height"));
+          if (!(height > 0) || !(rect.height > 0)) return;
+          return { top: rect.top + model.headerY / height * rect.height, bottom: rect.top + (model.headerY + model.totalHeight) / height * rect.height };
+        },
         current: () => model.source === group && this.headers.get(model) === element && element.isConnected
       });
     }

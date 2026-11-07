@@ -11,7 +11,7 @@ npm ci
 npm run package
 ```
 
-Packaging runs TypeScript checking, the 231-test regression suite, the production build, and creation of a deterministic plugin-only ZIP. The DOM suites use Happy DOM and a small Obsidian API fixture; they do not execute the native Obsidian app. The optional [collaboration bridge](COLLABORATION.md) checks include explicit annotation, exact lane identity, dirty-inspector navigation, range coordinate projection and mouse/touch/keyboard range selection. Team Relay's source interoperability fixture exercises both real view types and load orders with and without grouping, including range confirmation, exact lane markers, temporary navigation outside the data-derived axis and rebinding to empty query results. Native acceptance and remaining timeline targets are pending.
+Packaging runs TypeScript checking, the 255-test regression suite, the production build, and creation of a deterministic plugin-only ZIP. The DOM suites use Happy DOM and a small Obsidian API fixture; they do not execute the native Obsidian app. The optional [collaboration bridge](COLLABORATION.md) checks include explicit annotation, exact lane identity, dirty-inspector navigation, range coordinate projection and mouse/touch/keyboard range selection. Team Relay's source interoperability fixture exercises both real view types and load orders with and without grouping, including range confirmation, exact lane markers, temporary navigation outside the data-derived axis and rebinding to empty query results. Passive range presence now has source interoperability evidence for capture, lane matching, overlays and Jump/Follow. Native acceptance and remaining timeline targets are pending.
 
 Coverage includes:
 

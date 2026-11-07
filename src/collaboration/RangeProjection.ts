@@ -107,6 +107,26 @@ export function ordinalPixel(value: string, state: Pick<RangeState, 'axis' | 'de
   if (end <= start) throw new Error('Sequence precision is unavailable.');
   return Number(target - start) / Number(end - start) * state.axis.totalWidth;
 }
+/** Inverse for ambient presence, including fractional dense positions. Keep
+ * large origins in fixed-point arithmetic instead of adding small JS numbers. */
+export function ordinalValue(pixel: number, state: Pick<RangeState, 'axis' | 'denseValues'>): string {
+  let before: bigint, after: bigint, ratio: number;
+  if (state.denseValues) {
+    const dense = state.denseValues, position = state.axis.pixelToYear(pixel) - 1;
+    if (!dense.length || dense.length > 20_000 || position < 0 || position > dense.length - 1) throw new Error('Outside occupied Sequence positions.');
+    const index = Math.floor(position);
+    before = decimal(numberDecimal(dense[index])); after = decimal(numberDecimal(dense[Math.min(index + 1, dense.length - 1)])); ratio = position - index;
+    if (after < before) throw new Error('Ambiguous Sequence mapping.');
+  } else {
+    before = decimal(numberDecimal(state.axis.viewStart)); after = decimal(numberDecimal(state.axis.viewEnd)); ratio = pixel / state.axis.totalWidth;
+  }
+  if (!Number.isFinite(ratio) || ratio < 0 || ratio > 1 || after < before) throw new Error('Invalid Sequence position.');
+  const denominator = BigInt(1_000_000_000_000), value = before + (after - before) * BigInt(Math.round(ratio * Number(denominator))) / denominator;
+  const absolute = value < 0 ? -value : value;
+  const result = `${value < 0 ? '-' : ''}${absolute / scale}.${String(absolute % scale).padStart(9, '0')}`;
+  if (Math.abs(ordinalPixel(result, state) - pixel) > 0.1) throw new Error('Sequence position exceeds supported precision.');
+  return result;
+}
 function checkedRange(input: unknown, state: RangeState, expected: RangeAxis): TimelineRange {
   const range = parseTimelineRange(input), descriptor = axisDescriptor(state);
   if (!descriptor || axisKey(descriptor) !== axisKey(expected) || (state.renderer === 'sabidurian-sequence') !== (range.kind === 'ordinal')) throw new Error('The timeline axis changed.');

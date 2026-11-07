@@ -4,6 +4,7 @@ import { projectRange, rangeContext, rangeExtent, type RangeAxis, type RangeCont
 import { beginRangeInteraction } from './RangeInteraction';
 import type { HistoricalPoint, TimelineRange } from './TimelineRange';
 import { annotationPicker } from './AnnotationPicker';
+import { presenceRange } from './RangePresence';
 
 declare module 'obsidian' {
   interface Workspace {
@@ -13,6 +14,7 @@ declare module 'obsidian' {
 }
 
 export interface TimelinePoint { clientX: number; clientY: number }
+const validOffset = (offset: { x: number; y: number }) => offset && [offset.x, offset.y].every(value => Number.isFinite(value) && value >= 0 && value <= 1);
 
 /** Local host contract only. The consumer owns shared identities and permissions.
  * File paths, row positions and geometry never become durable comment IDs. */
@@ -28,6 +30,7 @@ export interface TimelineHandle {
 export interface TimelineGroupHandle {
   target: { type: 'group'; group: BasesEntryGroup };
   element: SVGElement;
+  band?(): { top: number; bottom: number } | undefined;
   current(): boolean;
 }
 export type TimelineSelectionHandle = TimelineHandle | TimelineGroupHandle;
@@ -53,11 +56,15 @@ export interface TimelineSurfacePort {
 export interface TimelineRangeGeometry {
   startX: number; endX: number; top: number; bottom: number; discontinuous: boolean; current(): boolean;
 }
+export interface TimelineRangePresence {
+  context: RangeContext; range: TimelineRange; group: BasesEntryGroup | null;
+  offset: { x: number; y: number }; current(): boolean;
+}
 
 /** One lifetime per Bases view, retained across renderer replacement. */
 export class TimelineSurface {
   readonly protocolVersion = 1;
-  readonly capabilities = Object.freeze(['item', 'cell', 'selection', 'geometry', 'reveal', 'annotation', 'groups', 'ranges'] as const);
+  readonly capabilities = Object.freeze(['item', 'cell', 'selection', 'geometry', 'reveal', 'annotation', 'groups', 'ranges', 'range-presence'] as const);
   private listeners = new Set<() => void>();
   private closed = false;
   private serial = 0;
@@ -111,6 +118,57 @@ export class TimelineSurface {
   }
   reveal(target: TimelineTarget): TimelineReveal { return this.viewport() && this.port.targetsCurrent?.() !== false && (target?.type === 'item' || target?.type === 'cell') ? this.port.reveal(target) : 'unavailable'; }
   rangeContext(): RangeContext | undefined { return this.current() ? rangeContext(() => this.current() ? this.port.ranges?.() : undefined) : undefined; }
+  /** Passive capture. No annotation gesture, task read, selection or saved write. */
+  rangePresence(point?: TimelinePoint): TimelineRangePresence | undefined {
+    try {
+      if (this.port.targetsCurrent?.() === false) return;
+      const context = this.rangeContext(), state = this.port.ranges?.(); if (!context || !state) return;
+      const svg = state.svg.getBoundingClientRect(), view = state.viewport.getBoundingClientRect();
+      const left = Math.max(svg.left, view.left), right = Math.min(svg.right, view.right), top = Math.max(svg.top, view.top), bottom = Math.min(svg.bottom, view.bottom);
+      if (![left, right, top, bottom].every(Number.isFinite) || right <= left || bottom <= top) return;
+      const x = point?.clientX ?? (left + right) / 2, y = point?.clientY ?? (top + bottom) / 2;
+      if (![x, y].every(Number.isFinite) || x < left || x > right || y < top || y > bottom) return;
+      const lanes = this.groups().filter(handle => {
+        const band = handle.current() && handle.band?.(); return band && y >= band.top && y < band.bottom;
+      });
+      if (lanes.length > 1) return;
+      const group = lanes[0]?.target.group ?? null;
+      const local = (value: number) => Math.max(0, Math.min(state.axis.totalWidth, (value - svg.left) / svg.width * state.axis.totalWidth));
+      const range = presenceRange(local(point ? x : left), local(point ? x : right), state); if (!range) return;
+      const geometry = this.rangePresenceGeometry(range, context.axis, group ?? undefined); if (!geometry) return;
+      const width = geometry.endX - geometry.startX, height = geometry.bottom - geometry.top;
+      const offset = { x: width > 0 ? Math.max(0, Math.min(1, (x - geometry.startX) / width)) : 0.5, y: (y - geometry.top) / height };
+      if (!validOffset(offset)) return;
+      return { context, range, group, offset, current: () => context.current() && geometry.current() };
+    } catch { return; }
+  }
+  rangePresenceGeometry(range: TimelineRange, axis: RangeAxis, group?: BasesEntryGroup): TimelineRangeGeometry | undefined {
+    try {
+      if (this.port.targetsCurrent?.() === false) return;
+      const context = this.rangeContext(), state = this.port.ranges?.(); if (!context || !state) return;
+      const projected = projectRange(range, state, axis), svg = state.svg.getBoundingClientRect(), view = state.viewport.getBoundingClientRect();
+      // The axis is linear in SVG coordinates. A rotated/skewed/reflected canvas
+      // cannot be represented by an axis-aligned bounding rectangle.
+      const matrixValues = () => { const matrix = state.svg.getScreenCTM?.(); return matrix && [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f]; };
+      const matrix = matrixValues();
+      if (typeof state.svg.getScreenCTM === 'function' && (!matrix || !matrix.every(Number.isFinite) || matrix[0] <= 0 || matrix[3] <= 0 || matrix[1] !== 0 || matrix[2] !== 0)) return;
+      const lanes = group ? this.groups().filter(handle => handle.target.group === group && handle.current()) : [];
+      if (group && lanes.length !== 1) return;
+      const band = lanes[0]?.band?.(); if (group && !band) return;
+      const top = band?.top ?? svg.top, bottom = band?.bottom ?? svg.bottom;
+      const startX = svg.left + projected.start / state.axis.totalWidth * svg.width, endX = svg.left + projected.end / state.axis.totalWidth * svg.width;
+      if (svg.width <= 0 || bottom <= top || projected.end < projected.start || projected.discontinuous && projected.end === projected.start || ![startX, endX, top, bottom].every(Number.isFinite)) return;
+      const serial = this.serial;
+      return { startX, endX, top, bottom, discontinuous: projected.discontinuous, current: () => {
+        const now = state.svg.getBoundingClientRect(), viewport = state.viewport.getBoundingClientRect(), lane = lanes[0]?.band?.();
+        return this.serial === serial && this.port.targetsCurrent?.() !== false && context.current() &&
+          JSON.stringify(matrixValues()) === JSON.stringify(matrix) &&
+          now.left === svg.left && now.top === svg.top && now.width === svg.width && now.height === svg.height &&
+          viewport.left === view.left && viewport.top === view.top && viewport.width === view.width && viewport.height === view.height &&
+          (!lanes[0] || lanes[0].current() && lane?.top === top && lane?.bottom === bottom);
+      } };
+    } catch { return; }
+  }
   rangeGeometry(range: TimelineRange, axis: RangeAxis, group?: BasesEntryGroup): TimelineRangeGeometry | undefined {
     try {
       const context = this.rangeContext(), state = this.port.ranges?.(); if (!context || !state) return;
@@ -127,11 +185,19 @@ export class TimelineSurface {
     } catch { return; }
   }
   revealRange(range: TimelineRange, axis: RangeAxis, group?: BasesEntryGroup): TimelineReveal {
+    return this.navigateRange(range, axis, group);
+  }
+  revealRangePresence(range: TimelineRange, axis: RangeAxis, offset: { x: number; y: number }, group?: BasesEntryGroup): TimelineReveal {
+    if (!validOffset(offset) || this.port.targetsCurrent?.() === false) return 'unavailable';
+    return this.navigateRange(range, axis, group, offset);
+  }
+  private navigateRange(range: TimelineRange, axis: RangeAxis, group?: BasesEntryGroup, offset?: { x: number; y: number }): TimelineReveal {
     if (TaskInspector.hasDirty(this.root.ownerDocument)) return 'busy';
     try {
       let context = this.rangeContext(), state = this.port.ranges?.(); if (!context || !state) return 'unavailable';
       // Validate semantic inputs even when dense projection has no such position.
-      rangeExtent(range, state, axis);
+      const extent = rangeExtent(range, state, axis);
+      if (offset && (extent.end < extent.start || extent.discontinuous && extent.end === extent.start)) return 'unavailable';
       if (group) {
         const lanes = this.groups().filter(handle => handle.current() && handle.target.group === group);
         if (lanes.length !== 1) return lanes.length ? 'ambiguous' : 'unavailable';
@@ -143,10 +209,18 @@ export class TimelineSurface {
         context = this.rangeContext(); state = this.port.ranges?.(); if (!context || !state) return 'unavailable';
         projected = projectRange(range, state, axis);
       }
+      const geometry = offset ? this.rangePresenceGeometry(range, axis, group) : undefined;
+      if (offset && !geometry) return 'unavailable';
       const start = Math.min(projected.start, projected.end);
-      if (group) { const result = this.revealGroup(group); if (result !== 'revealed') return result; }
+      if (group && !offset) { const result = this.revealGroup(group); if (result !== 'revealed') return result; }
       if (!context.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return 'busy';
-      state.viewport.scrollLeft = Math.max(0, Math.min(start - Math.min(48, state.viewport.clientWidth / 4), Math.max(0, state.viewport.scrollWidth - state.viewport.clientWidth)));
+      if (offset && geometry) {
+        const view = state.viewport.getBoundingClientRect(), sx = view.width / state.viewport.clientWidth, sy = view.height / state.viewport.clientHeight;
+        if (![sx, sy].every(value => Number.isFinite(value) && value > 0) || !geometry.current()) return 'unavailable';
+        const x = geometry.startX + (geometry.endX - geometry.startX) * offset.x, y = geometry.top + (geometry.bottom - geometry.top) * offset.y;
+        state.viewport.scrollLeft = Math.max(0, Math.min(state.viewport.scrollLeft + (x - view.left - view.width / 2) / sx, Math.max(0, state.viewport.scrollWidth - state.viewport.clientWidth)));
+        state.viewport.scrollTop = Math.max(0, Math.min(state.viewport.scrollTop + (y - view.top - view.height / 2) / sy, Math.max(0, state.viewport.scrollHeight - state.viewport.clientHeight)));
+      } else state.viewport.scrollLeft = Math.max(0, Math.min(start - Math.min(48, state.viewport.clientWidth / 4), Math.max(0, state.viewport.scrollWidth - state.viewport.clientWidth)));
       this.port.rangeScrolled?.();
       this.changed(); return 'revealed';
     } catch { return 'unavailable'; }

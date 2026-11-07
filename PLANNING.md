@@ -49,8 +49,8 @@ companion plugins. Team Relay's development consumer connects those targets to
 saved-view comment controls, including whole-view and supported lane ranges.
 Opening a range outside the displayed axis temporarily focuses that interval;
 **Return to data** restores the original view position. Dense Sequence uses
-original property values during this temporary focus. Native acceptance, shared
-markers and presence remain unfinished. Navigation adds no task writes or
+original property values during this temporary focus. Passive range presence and navigation have synthetic integration evidence.
+Native acceptance and complete shared marker workflows remain unfinished. Navigation adds no task writes or
 settings synchronization.
 
 An empty result set keeps the configured axis available for range comments,

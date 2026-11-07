@@ -5,7 +5,7 @@ The planning fork exposes a versioned local integration bridge for
 targeting, selection, visible geometry, guarded navigation, explicit annotation
 selection and lifecycle notifications. Team Relay's development consumer connects
 these to its saved-view comment controls. It does **not** yet provide the complete
-timeline comment feature: shared calendar markers, presence and native
+timeline comment feature: complete marker workflows and native
 desktop/mobile acceptance remain. Lane headers now expose exact query group
 objects; the consumer derives typed targets with its existing authorization.
 
@@ -141,7 +141,7 @@ Missing/invalid axis configuration remains unavailable. Replaced query results
 invalidate the consumer's old host binding, which must be inspected and bound
 again before using the new empty axis. Detached renderer/task/lane handles never
 become valid locations. The companion consumer owns the range comment form,
-saved decorations and persistence. Presence and shared milestones remain unfinished.
+saved decorations and persistence. Range presence is described below; complete shared milestone workflows remain unfinished.
 
 ## Navigation safety
 
@@ -202,7 +202,7 @@ This internal guard does not change the external protocol version.
 
 ## Verification and remaining work
 
-`npm run package` passes 246 synthetic regressions, TypeScript checking, production
+`npm run package` passes 255 synthetic regressions, TypeScript checking, production
 build and deterministic plugin-only packaging. The bridge cases use the real
 Timeline/Sequence views and renderers with the existing Happy DOM host adapter.
 They cover item/badge identity, aliases, re-render/rename, coordinate hit testing,
@@ -230,3 +230,36 @@ These tests do not establish native Obsidian desktop/mobile acceptance, rendered
 touch targets or battery behavior. No test vault or production plugin has been
 updated for this bridge. The archive remains a development build at the existing
 version; no new release tag or downloadable release has been published.
+
+## Passive timeline range presence
+
+The additive `range-presence` capability provides `rangePresence(point?)`,
+`rangePresenceGeometry(range, axis, group?)` and
+`revealRangePresence(range, axis, offset, group?)`. A point uses screen coordinates;
+omitting it captures the visible horizontal interval and viewport center. Results
+carry a validated axis, typed range, normalized offset, optional exact local query
+group and a `current()` guard. The companion supplies shared identity, permission
+checks, transport, labels and overlays. None of these methods enters annotation
+mode, selects an item, edits a task or persists presence.
+
+Pointers retain explicit instants, original Sequence values (including fractional
+dense positions), or historical Gregorian periods. The inverse Sequence mapping
+uses fixed-point arithmetic for large origins and rejects unrepresentable
+precision or positions outside the occupied dense domain. Repeated/nonexistent
+DST wall times have no guessed instant. Forward intervals crossing DST retain a
+civil-axis discontinuity; screen width is not UTC elapsed duration. A collapsed
+lane remains collapsed; its exact source and header-sized band remain available.
+Whole-view presence also works without plottable records.
+
+Projection uses the current SVG scale and full lane/content band. Captured geometry
+expires on scroll, resize, axis/query changes, renderer replacement or disposal.
+Reveal centers the selected offset, respects dirty inspectors, and uses temporary
+range focus for distant values; Return to data retains the previous viewport.
+This adds no zoom/settings synchronization or scheduling changes.
+
+Synthetic checks cover original-value interpolation, extreme precision, DST,
+historical periods, scaled coordinates, empty views, exact collapsed lanes,
+changed query/axis, navigation locks and no saved writes. The Team Relay source
+interoperability check exercises capture, shared lane matching, overlays and
+Jump/Follow through both real view types and either plugin load order. Native
+Obsidian desktop/mobile and resource acceptance remain unverified.

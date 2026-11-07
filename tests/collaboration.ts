@@ -114,6 +114,8 @@ for (const kind of ['timeline', 'sequence'] as const) {
     assert.equal(f.surface.beginAnnotation(() => assert.fail('dirty inspector selection'), () => {}), undefined);
     const body = f.surface.viewport()!, before = [body.scrollLeft, body.scrollTop];
     assert.equal(f.surface.reveal({ type: 'item', file: f.files[1] }), 'busy');
+    const context = f.surface.rangeContext()!;
+    assert.equal(f.surface.revealRangePresence(distantRange(kind === 'sequence'), context.axis, { x: 0.5, y: 0.5 }), 'busy');
     assert.deepEqual([body.scrollLeft, body.scrollTop], before); assert.equal(input.value, dirtyValue);
     modal.close(); assert.equal(TaskInspector.hasDirty(document), false);
     assert.equal(f.bridge.canNavigate(document), true);
@@ -639,4 +641,56 @@ test('dirty inspector input blocks both range focus and return without discardin
   f.root.querySelector<HTMLButtonElement>('.sabidurian-comment-range-focus button')!.click();
   assert.ok(f.root.querySelector('.sabidurian-comment-range-focus')); assert.equal(draft.value, retained);
   assert.deepEqual(f.configWrites, []); assert.deepEqual(f.writes, []);
+});
+
+for (const kind of ['timeline', 'sequence'] as const) {
+  test(`${kind}: passive presence preserves semantic coordinates across scaled viewports and clears stale geometry`, () => {
+    const f = fixture(kind), { viewport, svg } = rangeLayout(f);
+    Object.defineProperty(viewport, 'scrollHeight', { value: 400, configurable: true });
+    const initial = JSON.stringify(f.values), captured = f.surface.rangePresence({ clientX: 300, clientY: 150 });
+    assert.ok(captured?.current()); assert.equal(captured.range.kind, kind === 'sequence' ? 'ordinal' : 'instant');
+    const visible = f.surface.rangePresence(); assert.ok(visible?.current()); assert.notEqual(visible.range.start, visible.range.end);
+    assert.equal(captured.group, null); assert.equal(captured.offset.y, 0.25);
+    const geometry = f.surface.rangePresenceGeometry(captured.range, captured.context.axis)!;
+    assert.ok(Math.abs(geometry.startX - 300) < 0.01);
+    viewport.scrollLeft = 100; assert.equal(captured.current(), false); assert.equal(geometry.current(), false);
+    svg.getBoundingClientRect = () => new win.DOMRect(100 - viewport.scrollLeft, 50 - viewport.scrollTop, 1600, 400) as any;
+    assert.ok(Math.abs(f.surface.rangePresenceGeometry(captured.range, captured.context.axis)!.startX - 400) < 0.01);
+    assert.equal(f.surface.revealRangePresence(captured.range, captured.context.axis, captured.offset), 'revealed');
+    assert.ok(Math.abs(viewport.scrollLeft - 200) < 0.01); assert.equal(viewport.scrollTop, 0);
+    assert.equal(JSON.stringify(f.values), initial); assert.deepEqual(f.writes, []); assert.deepEqual(f.configWrites, []);
+    assert.equal(f.root.querySelector('.sabidurian-range-selection-status'), null);
+    assert.equal(f.surface.rangePresence({ clientX: -1, clientY: 150 }), undefined);
+    f.view.data = { ...f.view.data }; assert.equal(f.surface.rangePresence(), undefined);
+  });
+
+  test(`${kind}: range presence uses exact lane bands and preserves collapsed state`, () => {
+    const f = fixture(kind, true), { viewport } = rangeLayout(f), lane = f.surface.groups()[0];
+    Object.defineProperty(viewport, 'scrollHeight', { value: 400, configurable: true });
+    const band = lane.band!()!, y = (band.top + band.bottom) / 2, before = JSON.stringify(f.values);
+    const captured = f.surface.rangePresence({ clientX: 300, clientY: y }); assert.ok(captured?.current());
+    assert.equal(captured.group, f.view.data.groupedData[0]); assert.equal(captured.offset.y, 0.5);
+    assert.equal(f.surface.revealRangePresence(captured.range, captured.context.axis, captured.offset, captured.group), 'revealed');
+    assert.equal(f.surface.revealRangePresence(captured.range, captured.context.axis, { x: NaN, y: 0.5 }, captured.group), 'unavailable');
+    assert.equal(f.surface.revealRangePresence(captured.range, captured.context.axis, captured.offset, { ...captured.group }), 'unavailable');
+    assert.equal(JSON.stringify(f.values), before); assert.deepEqual(f.configWrites, []); assert.deepEqual(f.writes, []);
+    f.view.onunload(); assert.equal(f.surface.rangePresence(), undefined);
+  });
+}
+
+for (const kind of ['timeline', 'sequence'] as const) test(`${kind}: an empty native axis captures presence without inventing an item or lane`, () => {
+  const f = fixture(kind, false, true); rangeLayout(f);
+  const captured = f.surface.rangePresence({ clientX: 300, clientY: 150 }); assert.ok(captured?.current());
+  assert.equal(captured.group, null); assert.deepEqual(f.surface.handles(), []);
+  assert.ok(f.surface.rangePresence()); assert.deepEqual(f.writes, []); assert.deepEqual(f.configWrites, []);
+});
+
+test('range presence expires when viewport dimensions change and refuses a rotated SVG', () => {
+  const f = fixture('sequence'), { viewport, svg } = rangeLayout(f), capture = f.surface.rangePresence()!;
+  viewport.getBoundingClientRect = () => new win.DOMRect(100, 50, 600, 200) as any;
+  assert.equal(capture.current(), false);
+  const matrix = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }; (svg as any).getScreenCTM = () => matrix;
+  const unchangedBounds = f.surface.rangePresence({ clientX: 300, clientY: 150 })!; assert.ok(unchangedBounds.current());
+  matrix.b = 0.5; assert.equal(unchangedBounds.current(), false);
+  assert.equal(f.surface.rangePresence({ clientX: 300, clientY: 150 }), undefined);
 });

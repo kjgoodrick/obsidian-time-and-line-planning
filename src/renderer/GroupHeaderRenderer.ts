@@ -114,6 +114,11 @@ export class GroupHeaderRenderer {
     for (const [model, element] of this.headers) {
       const group = model.source;
       if (group && element.isConnected) handles.push({ target: { type: 'group', group }, element,
+        band: () => {
+          const rect = this.svg.getBoundingClientRect(), height = Number(this.svg.getAttribute('height'));
+          if (!(height > 0) || !(rect.height > 0)) return;
+          return { top: rect.top + model.headerY / height * rect.height, bottom: rect.top + (model.headerY + model.totalHeight) / height * rect.height };
+        },
         current: () => model.source === group && this.headers.get(model) === element && element.isConnected });
     }
     return handles;

@@ -7,6 +7,8 @@ import { axisDescriptor, draftRange, ordinalPixel, projectRange, type RangeState
 import { instantToWallMs, offsetISO } from '../src/utils/timezone';
 import { createRangeFocus, rangeFocusCurrent } from '../src/collaboration/RangeFocus';
 import '../src/scale/scales/index';
+import { presenceRange } from '../src/collaboration/RangePresence';
+import { ordinalValue } from '../src/collaboration/RangeProjection';
 
 const fixtures = JSON.parse(readFileSync('tests/fixtures/timeline-ranges-v1.json', 'utf8'));
 for (const row of fixtures.valid) test(`shared range contract: ${row.name}`, () => {
@@ -21,6 +23,33 @@ function state(sequence = false, zone = 'UTC'): RangeState {
     svg: {} as SVGSVGElement, viewport: {} as HTMLElement };
 }
 const row = (name: string) => fixtures.valid.find((row: { name: string }) => row.name === name).input;
+
+test('presence retains precise large Sequence origins and fractional dense values', () => {
+  const current = state(true); current.axis = new NumericAxis(999999999999998, 999999999999999, 1000);
+  assert.equal(ordinalValue(0.000001, current), '999999999999998.000000001');
+  assert.equal(presenceRange(0.000001, 0.000002, current)?.start, '999999999999998.000000001');
+  current.axis = new NumericAxis(1, 4, 300); current.denseValues = [10, 100, 1000];
+  assert.equal(ordinalValue(50, current), '55.000000000');
+  assert.equal(presenceRange(50, 150, current)?.end, '550');
+  assert.equal(presenceRange(0, 250, current), undefined); // No invented dense values beyond occupied positions.
+  current.denseValues = null; current.axis = new NumericAxis(0, 0.000000001, 1000);
+  assert.equal(presenceRange(250, 250, current), undefined); // Wire precision cannot represent this coordinate.
+});
+
+test('presence publishes explicit instants and historical periods but never guesses repeated or nonexistent civil times', () => {
+  const current = state(false, 'America/Denver'); current.axis = new NumericAxis(2026, 2027, 36500);
+  const regular = presenceRange(100, 100, current); assert.equal(regular?.kind, 'instant');
+  const spanning = presenceRange(6500, 6800, current); assert.ok(spanning);
+  assert.equal(projectRange(spanning, current, axisDescriptor(current)!).discontinuous, true);
+  const repeated = current.axis.yearToPixel(2026 + (304 + 1.5 / 24) / 365);
+  assert.equal(presenceRange(repeated, repeated, current), undefined);
+  const missing = current.axis.yearToPixel(2026 + (66 + 2.5 / 24) / 365);
+  assert.equal(presenceRange(missing, missing, current), undefined);
+  current.axis = new NumericAxis(-10, -9, 36500);
+  const historical = presenceRange(100, 150, current); assert.equal(historical?.kind, 'historical');
+  assert.ok(projectRange(historical, current, axisDescriptor(current)!).start <= 100);
+  assert.equal(presenceRange(NaN, 100, current), undefined); assert.equal(presenceRange(100, 99, current), undefined);
+});
 
 test('calendar and astronomical year-zero bounds project complete periods without local Date arithmetic', () => {
   const current = state(false, 'America/Denver');

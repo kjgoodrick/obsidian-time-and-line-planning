@@ -69,6 +69,7 @@ export class SabidurianView extends BasesView {
   private headerRenderer: HeaderRenderer | null = null;
   private timelineRenderer: TimelineRenderer | null = null;
   private barRenderer: BarRenderer | null = null;
+  private collaborationQuery?: BasesView['data'];
   private taskEdges: TaskEdgeNavigation | null = null;
   private sideTableRenderer: SideTableRenderer | null = null;
   private dragManager: DragManager | null = null;
@@ -133,6 +134,7 @@ export class SabidurianView extends BasesView {
     this.plugin = plugin;
     this.collaboration = new TimelineSurface({ owner: this, root: scrollEl,
       viewport: () => this.timelineRenderer?.element,
+      targetsCurrent: () => this.data === this.collaborationQuery,
       handles: () => this.barRenderer?.collaborationHandles() ?? [],
       hit: (node, point) => this.barRenderer?.collaborationHit(node, point),
       groups: () => this.groupHeaderRenderer?.collaborationGroups().filter(handle => this.data.groupedData.includes(handle.target.group)).map(handle => ({ ...handle,
@@ -159,8 +161,13 @@ export class SabidurianView extends BasesView {
     if (this.lockUpdateState && !this.pendingViewport && this.rootEl?.isConnected && this.timelineRenderer) {
       const next = this.captureLockUpdateState();
       if (next === this.lockUpdateState) {
+        // A verified lock-only notification may replace the query wrapper while
+        // keeping every displayed value/file unchanged. Rebind without a redraw.
+        const queryChanged = this.data !== this.collaborationQuery;
+        this.collaborationQuery = this.data;
         const locked = this.config.get('locked') as boolean | undefined;
         this.applyLockState(locked ?? (this.plugin.settings.lockOnMobile && isTouchDevice()));
+        if (queryChanged) this.collaboration.changed();
         return;
       }
     }
@@ -447,6 +454,7 @@ export class SabidurianView extends BasesView {
     this.viewportCuller = new ViewportCuller((row) => this.layoutEngine.getRowY(row));
 
     // BarRenderer is created once; render() will be called with visible subset
+    this.collaborationQuery = this.data;
     this.barRenderer = new BarRenderer(
       this.timelineRenderer.svgElement,
       this.plugin.app,

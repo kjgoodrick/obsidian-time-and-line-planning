@@ -3,6 +3,7 @@ import { TaskInspector } from '../interaction/TaskInspector';
 import { projectRange, rangeContext, rangeExtent, type RangeAxis, type RangeContext, type RangeKind, type RangeSelection, type RangeState } from './RangeProjection';
 import { beginRangeInteraction } from './RangeInteraction';
 import type { HistoricalPoint, TimelineRange } from './TimelineRange';
+import { annotationPicker } from './AnnotationPicker';
 
 declare module 'obsidian' {
   interface Workspace {
@@ -35,6 +36,8 @@ export interface TimelineSurfacePort {
   owner: BasesView;
   root: HTMLElement;
   viewport(): HTMLElement | undefined;
+  /** Rendered item/lane handles cannot outlive replacement query results. */
+  targetsCurrent?(): boolean;
   handles(): TimelineHandle[];
   hit(node: Node, point?: TimelinePoint): TimelineHandle | undefined;
   selection(): TFile[];
@@ -72,29 +75,29 @@ export class TimelineSurface {
   }
   private handle(value: TimelineHandle): TimelineHandle {
     const revision = this.serial;
-    return Object.freeze({ ...value, current: () => this.current() && this.serial === revision && value.current() });
+    return Object.freeze({ ...value, current: () => this.current() && this.port.targetsCurrent?.() !== false && this.serial === revision && value.current() });
   }
-  handles(): TimelineHandle[] { return this.current() ? this.port.handles().map(handle => this.handle(handle)) : []; }
+  handles(): TimelineHandle[] { return this.current() && this.port.targetsCurrent?.() !== false ? this.port.handles().map(handle => this.handle(handle)) : []; }
   groups(): TimelineGroupHandle[] {
-    if (!this.current()) return [];
+    if (!this.current() || this.port.targetsCurrent?.() === false) return [];
     const revision = this.serial, handles = this.port.groups?.() ?? [];
     return handles.length <= 256 ? handles.map(handle => ({ ...handle,
-      current: () => this.current() && this.serial === revision && handle.current() })) : [];
+      current: () => this.current() && this.port.targetsCurrent?.() !== false && this.serial === revision && handle.current() })) : [];
   }
   groupHit(node: Node): TimelineGroupHandle | undefined {
     const matches = this.groups().filter(handle => handle.element.contains(node) && handle.current());
     return matches.length === 1 ? matches[0] : undefined;
   }
   revealGroup(group: BasesEntryGroup): TimelineReveal {
-    if (!this.viewport()) return 'unavailable';
+    if (!this.viewport() || this.port.targetsCurrent?.() === false) return 'unavailable';
     if (TaskInspector.hasDirty(this.root.ownerDocument)) return 'busy';
     return this.port.revealGroup?.(group) ?? 'unavailable';
   }
   hit(node: Node, point?: TimelinePoint): TimelineHandle | undefined {
-    if (!this.current()) return;
+    if (!this.current() || this.port.targetsCurrent?.() === false) return;
     const handle = this.port.hit(node, point); return handle ? this.handle(handle) : undefined;
   }
-  selection(): TFile[] { return this.current() ? this.port.selection().slice(0, 256) : []; }
+  selection(): TFile[] { return this.current() && this.port.targetsCurrent?.() !== false ? this.port.selection().slice(0, 256) : []; }
   geometry(target: TimelineTarget): DOMRect | undefined {
     const viewport = this.viewport(); if (!viewport) return;
     const bounds = viewport.getBoundingClientRect();
@@ -106,7 +109,7 @@ export class TimelineSurface {
       if (rect.width > 0 && rect.height > 0 && rect.right > bounds.left && rect.left < bounds.right && rect.bottom > bounds.top && rect.top < bounds.bottom) return rect;
     }
   }
-  reveal(target: TimelineTarget): TimelineReveal { return this.viewport() && (target?.type === 'item' || target?.type === 'cell') ? this.port.reveal(target) : 'unavailable'; }
+  reveal(target: TimelineTarget): TimelineReveal { return this.viewport() && this.port.targetsCurrent?.() !== false && (target?.type === 'item' || target?.type === 'cell') ? this.port.reveal(target) : 'unavailable'; }
   rangeContext(): RangeContext | undefined { return this.current() ? rangeContext(() => this.current() ? this.port.ranges?.() : undefined) : undefined; }
   rangeGeometry(range: TimelineRange, axis: RangeAxis, group?: BasesEntryGroup): TimelineRangeGeometry | undefined {
     try {
@@ -164,16 +167,29 @@ export class TimelineSurface {
     if (!this.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return;
     this.stopAnnotation?.(); this.stopRange?.();
     const cleanup: (() => void)[] = []; let live = true, start: TimelinePoint | undefined, dragged = false;
+    let picker: ReturnType<typeof annotationPicker> | undefined;
     const listen = (target: EventTarget, type: string, handler: EventListener) => {
       target.addEventListener(type, handler, true); cleanup.push(() => target.removeEventListener(type, handler, true));
     };
     const stop = () => {
       if (!live) return; live = false;
       for (const dispose of cleanup) dispose(); if (this.stopAnnotation === stop) this.stopAnnotation = undefined;
+      picker?.dispose();
       try { stopped(); } catch { /* Consumers cannot retain editing interception. */ }
     };
+    const choose = (handle: TimelineSelectionHandle) => {
+      if (!live || !this.current() || TaskInspector.hasDirty(this.root.ownerDocument) || !handle.current()) return;
+      stop(); select(handle);
+    };
     this.stopAnnotation = stop;
+    const viewport = this.viewport();
+    picker = annotationPicker(this.root, () => [...this.handles(), ...this.groups()], choose, stop);
+    cleanup.push(this.onChange(() => {
+      if (!this.current() || this.viewport() !== viewport || !picker?.current()) { stop(); return; }
+      picker.refresh();
+    }));
     listen(this.root, 'pointerdown', event => {
+      if (picker?.contains(event.target)) return;
       const pointer = event as PointerEvent; start = { clientX: pointer.clientX, clientY: pointer.clientY }; dragged = false;
       event.stopImmediatePropagation();
     });
@@ -182,24 +198,29 @@ export class TimelineSurface {
       if (start && Math.hypot(pointer.clientX - start.clientX, pointer.clientY - start.clientY) > 8) dragged = true;
     });
     listen(this.root, 'pointercancel', () => { dragged = true; });
-    listen(this.root, 'touchstart', event => { event.stopImmediatePropagation(); });
-    for (const type of ['mousedown', 'contextmenu']) listen(this.root, type, event => { event.preventDefault(); event.stopImmediatePropagation(); });
+    listen(this.root, 'touchstart', event => { if (!picker?.contains(event.target)) event.stopImmediatePropagation(); });
+    for (const type of ['mousedown', 'contextmenu']) listen(this.root, type, event => {
+      if (!picker?.contains(event.target)) { event.preventDefault(); event.stopImmediatePropagation(); }
+    });
     listen(this.root, 'click', event => {
+      if (picker?.contains(event.target)) return;
       event.preventDefault(); event.stopImmediatePropagation();
       const pointer = event as MouseEvent;
       if (dragged || !this.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return;
       const handle = event.target && (this.groupHit(event.target as Node) ?? this.hit(event.target as Node, pointer));
       if (!handle?.current()) return;
-      stop(); select(handle);
+      choose(handle);
     });
     listen(this.root, 'keydown', event => {
       if ((event as KeyboardEvent).key === 'Tab') return;
+      if (picker?.contains(event.target)) { picker.key(event as KeyboardEvent); event.stopImmediatePropagation(); return; }
       event.preventDefault(); event.stopImmediatePropagation();
       if ((event as KeyboardEvent).key === 'Escape') stop();
     });
     listen(this.root.ownerDocument, 'keydown', event => { if ((event as KeyboardEvent).key === 'Escape') stop(); });
     listen(this.root.ownerDocument, 'visibilitychange', () => { if (this.root.ownerDocument.hidden) stop(); });
     const window = this.root.ownerDocument.defaultView; if (window) listen(window, 'blur', event => { if (event.target === window) stop(); });
+    picker.focus();
     return stop;
   }
   onChange(listener: () => void): () => void {

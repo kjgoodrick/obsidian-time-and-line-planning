@@ -166,6 +166,21 @@ returns an idempotent cleanup function, or undefined when unavailable or blocked
 by inspector changes. The consumer must expose an explicit entry/cancel control.
 The selection callback accepts either an item/cell handle or a group handle.
 Lane header selection is intercepted before its normal collapse action.
+An accessible native-select picker lists currently rendered items, property
+badges and lanes in DOM order. It retains full file paths/property namespaces,
+highlights the selected handle, and provides Comment and Cancel buttons. Native
+arrow/type-ahead behavior and Tab remain available; Enter on the select confirms
+its explicit choice. Composing/modified Enter does not confirm. Keyboard selection
+uses the same exact current handle and authorization path as clicking. A missing
+or ambiguous target clears selection instead of choosing another target.
+
+The picker does not enumerate unrendered/offscreen tasks or evaluate query filters;
+broader keyboard viewport navigation remains work. Geometry-only notifications
+refresh handle wrappers while retaining exact identity. Renderer replacement,
+Escape, blur, hiding and disposal remove the picker/highlight and release
+interception. Cleanup restores prior focus only when focus is still owned by the
+picker. It never replaces focus that the user moved to another control.
+
 Capture listeners prevent task editing, mouse compatibility gestures, context
 menus and scheduling keys. A click/tap resolves the exact current handle, removes
 the listeners, calls `stopped`, then synchronously calls `select(handle)`. It does
@@ -179,16 +194,25 @@ explicit cleanup exit the mode. Re-entering stops the previous mode. The consume
 must also cancel on permission loss, rebinding or its own unload. Physical touch,
 keyboard accessibility and native host acceptance remain release gates.
 
+Item/lane handles, hit tests, selected files and item/lane navigation now check
+the query wrapper that produced the renderer, including the gap before a new
+result is rendered. Verified Timeline lock-only notifications can rebind an
+equivalent wrapper without rebuilding the canvas or losing focus/measurement.
+This internal guard does not change the external protocol version.
+
 ## Verification and remaining work
 
-`npm run package` passes 231 synthetic regressions, TypeScript checking, production
+`npm run package` passes 246 synthetic regressions, TypeScript checking, production
 build and deterministic plugin-only packaging. The bridge cases use the real
 Timeline/Sequence views and renderers with the existing Happy DOM host adapter.
 They cover item/badge identity, aliases, re-render/rename, coordinate hit testing,
 viewport clipping, selection preservation, collapsed groups, dirty inspector
 navigation, empty results, ambiguous properties, explicit annotation, touch-drag
 suppression, blur/visibility cleanup, exact lane identity, collapsed-lane
-selection/navigation, equal labels, query replacement and disposal. Team Relay also has a source
+selection/navigation, equal labels, query replacement and disposal. Keyboard picker
+checks cover exact item/property/lane identity, dirty inspectors, empty results,
+query changes before repaint, native key defaults, focus and lock-only rebinding.
+Team Relay also has a source
 interoperability script that bundles both plugins' real view/bridge/client/adapter
 code against a synthetic Obsidian host, covering both view types and load orders,
 including typed lane source capture and range selection/projection/navigation.

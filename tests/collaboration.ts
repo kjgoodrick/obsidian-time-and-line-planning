@@ -202,6 +202,125 @@ for (const kind of ['timeline', 'sequence'] as const) {
 	assert.equal(selected, 1); assert.equal(stopped, 1); assert.deepEqual(f.writes, []);
   });
 
+  test(`${kind}: keyboard picker selects the exact property without scheduling keys or writes`, () => {
+    const f = fixture(kind), trigger = document.createElement('button'); document.body.append(trigger); trigger.focus();
+    const received: TimelineHandle[] = []; let stopped = 0, scheduleKeys = 0;
+    f.root.addEventListener('keydown', () => scheduleKeys++);
+    const before = JSON.stringify(f.values);
+    f.surface.beginAnnotation((handle: TimelineHandle) => received.push(handle), () => stopped++);
+    const panel = f.root.querySelector('.sabidurian-annotation-picker')!;
+    const picker = panel.querySelector('select')!;
+    assert.equal(document.activeElement, picker);
+    assert.equal(panel.querySelector('label')?.htmlFor, picker.id);
+    assert.ok(document.getElementById(picker.getAttribute('aria-describedby')!)?.getAttribute('role') === 'status');
+    const option = [...picker.options].find(option => option.textContent === `Property: ${f.files[0].path} — note.status`)!;
+    assert.ok(option); picker.value = option.value; picker.dispatchEvent(new win.Event('change', { bubbles: true }));
+    const arrow = new win.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }); picker.dispatchEvent(arrow);
+    assert.equal(arrow.defaultPrevented, false); assert.equal(scheduleKeys, 0);
+    picker.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true }));
+    picker.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true }));
+    assert.equal(received.length, 0);
+    // A scroll/geometry notification replaces wrappers without changing identity.
+    f.surface.changed();
+    picker.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    assert.equal(received.length, 1); assert.equal(received[0].current(), true);
+    assert.equal(received[0].target.type, 'cell'); assert.equal(received[0].target.file, f.files[0]);
+    assert.equal((received[0].target as any).property, 'note.status'); assert.equal(stopped, 1);
+    assert.equal(f.root.querySelector('.sabidurian-annotation-picker'), null);
+    assert.equal(f.root.querySelector('.sabidurian-annotation-target'), null); assert.equal(document.activeElement, trigger);
+    assert.equal(JSON.stringify(f.values), before); assert.deepEqual(f.configWrites, []); assert.deepEqual(f.writes, []);
+  });
+
+  test(`${kind}: picker confirmation rechecks an inspector that becomes dirty after selection begins`, () => {
+    const f = fixture(kind); let selected = 0;
+    const stop = f.surface.beginAnnotation(() => selected++, () => {});
+    const picker = f.root.querySelector<HTMLSelectElement>('.sabidurian-annotation-picker select')!;
+    picker.value = [...picker.options].find(option => option.textContent === `Item: ${f.files[0].path}`)!.value;
+    picker.dispatchEvent(new win.Event('change', { bubbles: true }));
+    const modal = new TaskInspector(f.plugin.app as any, f.files[0] as any,
+      { start: 'start', end: 'end', label: 'title', dependencies: 'blocked-by', zone: 'UTC' }, f.plugin.history as any, false, () => {}, () => {});
+    modal.open(); modal.contentEl.querySelector('input')!.value = '2026-11-27T10:15';
+    picker.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    assert.equal(selected, 0); assert.equal(modal.contentEl.querySelector('input')!.value, '2026-11-27T10:15');
+    assert.deepEqual(f.writes, []); stop(); modal.close();
+  });
+
+  test(`${kind}: native picker buttons confirm exact items and cancel without selecting`, () => {
+    const f = fixture(kind); let selected: any, stopped = 0;
+    f.surface.beginAnnotation((handle: any) => { selected = handle; }, () => stopped++);
+    const panel = f.root.querySelector('.sabidurian-annotation-picker')!, picker = panel.querySelector('select')!;
+    picker.value = [...picker.options].find(option => option.textContent === `Item: ${f.files[1].path}`)!.value;
+    picker.dispatchEvent(new win.Event('change', { bubbles: true }));
+    panel.querySelector('button')!.click();
+    assert.equal(selected.target.type, 'item'); assert.equal(selected.target.file, f.files[1]); assert.equal(stopped, 1);
+    f.surface.beginAnnotation(() => assert.fail('Cancel selected a target'), () => stopped++);
+    f.root.querySelectorAll<HTMLButtonElement>('.sabidurian-annotation-picker button')[1].click();
+    assert.equal(stopped, 2); assert.deepEqual(f.writes, []);
+  });
+
+  if (kind === 'timeline') test('timeline: verified lock-only query replacement rebinds item handles without redrawing', () => {
+    const f = fixture(kind), body = f.surface.viewport();
+    const oldHandle = f.surface.handles().find((handle: TimelineHandle) => handle.target.type === 'item')!;
+    f.view.setLocked(false);
+    f.view.data = { ...f.view.data, data: [...f.view.data.data] };
+    assert.equal(oldHandle.current(), false);
+    f.view.onDataUpdated();
+    assert.equal(f.surface.viewport() === body, true);
+    const current = f.surface.handles().find((handle: TimelineHandle) => handle.target.type === 'item' && handle.target.file === oldHandle.target.file)!;
+    assert.ok(current); assert.equal(current.current(), true); assert.equal(oldHandle.current(), false);
+    assert.deepEqual(f.writes, []);
+  });
+
+  test(`${kind}: keyboard lane selection keeps source identity and collapsed state`, () => {
+    const f = fixture(kind, true), group = f.view.data.groupedData[0], heading = f.surface.groups()[0].element;
+    let selected: any;
+    f.surface.beginAnnotation((handle: any) => { selected = handle; }, () => {});
+    const picker = f.root.querySelector<HTMLSelectElement>('.sabidurian-annotation-picker select')!;
+    picker.value = [...picker.options].find(option => option.textContent?.startsWith('Lane:'))!.value;
+    picker.dispatchEvent(new win.Event('change', { bubbles: true }));
+    assert.equal(heading.classList.contains('sabidurian-annotation-target'), true);
+    picker.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    assert.equal(selected.target.type, 'group'); assert.equal(selected.target.group, group);
+    assert.equal(heading.getAttribute('aria-expanded'), 'false'); assert.deepEqual(f.writes, []); assert.deepEqual(f.configWrites, []);
+  });
+
+  test(`${kind}: disappearing picker target cannot become another target or whole-view comment`, () => {
+    const f = fixture(kind); let selected = 0, stopped = 0;
+    f.surface.beginAnnotation(() => selected++, () => stopped++);
+    const panel = f.root.querySelector('.sabidurian-annotation-picker')!, picker = panel.querySelector('select')!;
+    picker.value = [...picker.options].find(option => option.textContent === `Item: ${f.files[0].path}`)!.value;
+    picker.dispatchEvent(new win.Event('change', { bubbles: true }));
+    const oldHandle = f.surface.handles().find((handle: TimelineHandle) => handle.target.type === 'item')!;
+    // Query identity is checked even before the renderer processes the update.
+    f.view.data = { data: [], groupedData: [] };
+    assert.equal(oldHandle.current(), false); assert.equal(f.surface.hit(oldHandle.element), undefined);
+    assert.equal(f.surface.reveal(oldHandle.target), 'unavailable'); assert.deepEqual(f.surface.selection(), []);
+    picker.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    assert.equal(selected, 0); assert.equal(picker.value, ''); assert.equal(panel.querySelector('button')?.disabled, true);
+    assert.match(panel.querySelector('[role="status"]')!.textContent!, /changed|ambiguous/);
+    f.view.onDataUpdated();
+    assert.equal(stopped, 1); assert.equal(f.root.querySelector('.sabidurian-annotation-picker'), null); assert.deepEqual(f.writes, []);
+  });
+
+  test(`${kind}: empty annotation picker has an accessible cancel path and never chooses a fallback`, () => {
+    const f = fixture(kind); f.view.data = { data: [], groupedData: [] }; f.view.onDataUpdated();
+    let stopped = 0; f.surface.beginAnnotation(() => assert.fail('empty picker selected'), () => stopped++);
+    const panel = f.root.querySelector('.sabidurian-annotation-picker')!, picker = panel.querySelector('select')!;
+    assert.equal(picker.options.length, 1); assert.equal(panel.querySelector('button')?.disabled, true);
+    assert.match(panel.querySelector('[role="status"]')!.textContent!, /No item, property or lane/);
+    picker.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    assert.equal(stopped, 0);
+    picker.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    assert.equal(stopped, 1); assert.deepEqual(f.writes, []);
+  });
+
+  test(`${kind}: cancelling annotation does not steal focus moved outside the picker`, () => {
+    const f = fixture(kind), outside = document.createElement('input'); document.body.append(outside);
+    f.surface.beginAnnotation(() => assert.fail('unexpected choice'), () => {}); outside.focus();
+    outside.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    assert.equal(document.activeElement, outside); assert.equal(f.root.querySelector('.sabidurian-annotation-picker'), null);
+  });
+
   test(`${kind}: annotation guards close on Escape and unload`, () => {
 	const f = fixture(kind); let stopped = 0, selected = 0;
 	f.surface.beginAnnotation(() => selected++, () => stopped++);

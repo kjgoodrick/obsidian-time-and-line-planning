@@ -221,8 +221,8 @@ var Scheduling = class {
 };
 
 // src/model/labels.ts
-function fullLabel(label, properties, order) {
-  return [label, ...order.map((key) => properties[key]).filter((value) => value && value !== "null")].join(" \xB7 ");
+function fullLabel(label2, properties, order) {
+  return [label2, ...order.map((key) => properties[key]).filter((value) => value && value !== "null")].join(" \xB7 ");
 }
 function labelWidth(text) {
   return Array.from(text).length * 8 + 20;
@@ -249,8 +249,8 @@ function resolveTaskIcon(value, app, sourcePath) {
   if (text.length <= 32 && /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(text) && !/[<>:/]/.test(text))
     return { kind: "emoji", value: text };
 }
-function iconLabel(label, icon) {
-  return (icon == null ? void 0 : icon.kind) === "emoji" && !label.trimStart().startsWith(icon.value) ? `${icon.value} ${label}` : label;
+function iconLabel(label2, icon) {
+  return (icon == null ? void 0 : icon.kind) === "emoji" && !label2.trimStart().startsWith(icon.value) ? `${icon.value} ${label2}` : label2;
 }
 function prependTaskImage(element, icon) {
   if ((icon == null ? void 0 : icon.kind) !== "image") return;
@@ -557,8 +557,8 @@ var _TaskInspector = class _TaskInspector extends import_obsidian.Modal {
     el.createEl("p", { text: f.zone, cls: "sabidurian-editor-zone" });
     const expectedInputs = /* @__PURE__ */ new Map();
     const timeFields = el.createDiv({ cls: "sabidurian-time-fields" });
-    const makeTime = (label, value) => {
-      const wrap = timeFields.createEl("label", { text: label });
+    const makeTime = (label2, value) => {
+      const wrap = timeFields.createEl("label", { text: label2 });
       const input = wrap.createEl("input", { type: "datetime-local" });
       input.step = "1";
       try {
@@ -600,11 +600,11 @@ var _TaskInspector = class _TaskInspector extends import_obsidian.Modal {
     const navigationMessage = "Save or discard your changes before leaving this task.";
     const updateCloseLabel = () => {
       var _a2, _b2, _c2, _d2;
-      const dirty = isDirty(), label = dirty ? "Discard changes" : "Close";
-      closeButton == null ? void 0 : closeButton.setText(label);
+      const dirty = isDirty(), label2 = dirty ? "Discard changes" : "Close";
+      closeButton == null ? void 0 : closeButton.setText(label2);
       const closeIcon = (_d2 = (_a2 = this.modalEl) == null ? void 0 : _a2.querySelector(":scope > .modal-close-button")) != null ? _d2 : (_c2 = (_b2 = this.modalEl) == null ? void 0 : _b2.querySelector(":scope > .modal-header-button > svg.lucide-x")) == null ? void 0 : _c2.parentElement;
-      closeIcon == null ? void 0 : closeIcon.setAttribute("aria-label", label);
-      closeIcon == null ? void 0 : closeIcon.setAttribute("title", label);
+      closeIcon == null ? void 0 : closeIcon.setAttribute("aria-label", label2);
+      closeIcon == null ? void 0 : closeIcon.setAttribute("title", label2);
       if (!dirty && error.textContent === navigationMessage) error.setText("");
     };
     startInput.addEventListener("input", updateCloseLabel);
@@ -792,8 +792,8 @@ var NewTaskModal = class extends import_obsidian.Modal {
     const propertiesEl = el.createDiv({ cls: "sabidurian-time-fields" });
     const selects = /* @__PURE__ */ new Map();
     const required = new Set((_b = this.options.required) != null ? _b : []);
-    const addSelect = (property2, label, choices) => {
-      const field = propertiesEl.createEl("label", { text: required.has(property2) ? `${label} (required)` : label });
+    const addSelect = (property2, label2, choices) => {
+      const field = propertiesEl.createEl("label", { text: required.has(property2) ? `${label2} (required)` : label2 });
       const select = field.createEl("select", { attr: { "aria-label": property2 } });
       select.required = required.has(property2);
       select.createEl("option", { value: "", text: "Unassigned" });
@@ -1356,6 +1356,127 @@ function beginRangeInteraction(root, read, context, kind, precision, select, sto
   return stop;
 }
 
+// src/collaboration/AnnotationPicker.ts
+var pickerId = 0;
+function sameTarget(left, right) {
+  const a = left.target, b = right.target;
+  if (a.type === "group" || b.type === "group") return a.type === "group" && b.type === "group" && a.group === b.group;
+  return a.type === b.type && a.file === b.file && (a.type !== "cell" || b.type === "cell" && a.property === b.property);
+}
+function label(handle) {
+  var _a, _b;
+  const target = handle.target;
+  if (target.type === "group") return `Lane: ${((_b = (_a = handle.element.querySelector("text")) == null ? void 0 : _a.textContent) == null ? void 0 : _b.trim()) || "Untitled lane"}`;
+  return target.type === "cell" ? `Property: ${target.file.path} \u2014 ${target.property}` : `Item: ${target.file.path}`;
+}
+function annotationPicker(root, read, choose, cancel) {
+  const doc = root.ownerDocument, priorFocus = doc.activeElement;
+  const panel = doc.createElement("div");
+  panel.className = "sabidurian-annotation-picker";
+  panel.setAttribute("role", "group");
+  panel.setAttribute("aria-label", "Choose a comment target");
+  const name = doc.createElement("label");
+  name.textContent = "Comment target";
+  const select = doc.createElement("select");
+  select.id = `sabidurian-annotation-target-${++pickerId}`;
+  name.htmlFor = select.id;
+  const confirm = doc.createElement("button");
+  confirm.type = "button";
+  confirm.textContent = "Comment";
+  const close = doc.createElement("button");
+  close.type = "button";
+  close.textContent = "Cancel";
+  const status = doc.createElement("span");
+  status.id = `${select.id}-status`;
+  status.setAttribute("role", "status");
+  select.setAttribute("aria-describedby", status.id);
+  panel.append(name, select, confirm, close, status);
+  root.append(panel);
+  let handles = [], selected, marked;
+  let live = true;
+  const clearMark = () => {
+    marked == null ? void 0 : marked.classList.remove("sabidurian-annotation-target");
+    marked = void 0;
+  };
+  const paint = () => {
+    clearMark();
+    confirm.disabled = !selected;
+    if (selected == null ? void 0 : selected.current()) {
+      marked = selected.element;
+      marked.classList.add("sabidurian-annotation-target");
+    }
+  };
+  const refresh = () => {
+    if (!live) return;
+    const next = read().filter((handle) => handle.current() && root.contains(handle.element));
+    next.sort((a, b) => {
+      const position = a.element.compareDocumentPosition(b.element);
+      return position & 4 ? -1 : position & 2 ? 1 : 0;
+    });
+    const previous = selected, matches = previous ? next.filter((handle) => sameTarget(previous, handle)) : [];
+    selected = matches.length === 1 ? matches[0] : void 0;
+    const changed = next.length !== handles.length || next.some((handle, index) => {
+      var _a;
+      return handle.element !== handles[index].element || !sameTarget(handle, handles[index]) || label(handle) !== ((_a = select.options[index + 1]) == null ? void 0 : _a.textContent);
+    });
+    handles = next;
+    if (changed || !select.options.length) {
+      const prompt = doc.createElement("option");
+      prompt.value = "";
+      prompt.textContent = "Choose an item, property or lane";
+      const options = handles.map((handle, index) => {
+        const option = doc.createElement("option");
+        option.value = String(index);
+        option.textContent = label(handle);
+        return option;
+      });
+      select.replaceChildren(prompt, ...options);
+    }
+    select.value = selected ? String(handles.indexOf(selected)) : "";
+    status.textContent = previous && !selected ? "That target changed or is ambiguous. Choose again." : handles.length ? "Choose here or click the timeline. Press Enter to comment. Escape cancels." : "No item, property or lane targets are currently available. Cancel to change the view.";
+    paint();
+  };
+  const submit = () => {
+    if (!live) return;
+    refresh();
+    if (selected == null ? void 0 : selected.current()) choose(selected);
+  };
+  select.addEventListener("change", () => {
+    const value = select.value;
+    selected = value !== "" && /^\d+$/.test(value) ? handles[Number(value)] : void 0;
+    refresh();
+  });
+  confirm.addEventListener("click", submit);
+  close.addEventListener("click", cancel);
+  for (const type of ["click", "pointerdown", "mousedown", "touchstart", "contextmenu"]) {
+    panel.addEventListener(type, (event) => event.stopPropagation());
+  }
+  refresh();
+  return {
+    current: () => live && panel.isConnected && root.contains(panel),
+    contains: (node) => !!node && panel.contains(node),
+    refresh,
+    focus: () => select.focus({ preventScroll: true }),
+    key: (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancel();
+      } else if (event.target === select && event.key === "Enter" && !event.isComposing && !event.ctrlKey && !event.altKey && !event.metaKey) {
+        event.preventDefault();
+        submit();
+      }
+    },
+    dispose: () => {
+      if (!live) return;
+      live = false;
+      const restore = panel.contains(doc.activeElement) || doc.activeElement === doc.body;
+      clearMark();
+      panel.remove();
+      if (restore && (priorFocus == null ? void 0 : priorFocus.isConnected) && typeof priorFocus.focus === "function") priorFocus.focus({ preventScroll: true });
+    }
+  };
+}
+
 // src/collaboration/CollaborationBridge.ts
 var TimelineSurface = class {
   constructor(port) {
@@ -1384,18 +1505,25 @@ var TimelineSurface = class {
   }
   handle(value) {
     const revision = this.serial;
-    return Object.freeze({ ...value, current: () => this.current() && this.serial === revision && value.current() });
+    return Object.freeze({ ...value, current: () => {
+      var _a, _b;
+      return this.current() && ((_b = (_a = this.port).targetsCurrent) == null ? void 0 : _b.call(_a)) !== false && this.serial === revision && value.current();
+    } });
   }
   handles() {
-    return this.current() ? this.port.handles().map((handle) => this.handle(handle)) : [];
+    var _a, _b;
+    return this.current() && ((_b = (_a = this.port).targetsCurrent) == null ? void 0 : _b.call(_a)) !== false ? this.port.handles().map((handle) => this.handle(handle)) : [];
   }
   groups() {
-    var _a, _b, _c;
-    if (!this.current()) return [];
-    const revision = this.serial, handles = (_c = (_b = (_a = this.port).groups) == null ? void 0 : _b.call(_a)) != null ? _c : [];
+    var _a, _b, _c, _d, _e;
+    if (!this.current() || ((_b = (_a = this.port).targetsCurrent) == null ? void 0 : _b.call(_a)) === false) return [];
+    const revision = this.serial, handles = (_e = (_d = (_c = this.port).groups) == null ? void 0 : _d.call(_c)) != null ? _e : [];
     return handles.length <= 256 ? handles.map((handle) => ({
       ...handle,
-      current: () => this.current() && this.serial === revision && handle.current()
+      current: () => {
+        var _a2, _b2;
+        return this.current() && ((_b2 = (_a2 = this.port).targetsCurrent) == null ? void 0 : _b2.call(_a2)) !== false && this.serial === revision && handle.current();
+      }
     })) : [];
   }
   groupHit(node) {
@@ -1403,18 +1531,20 @@ var TimelineSurface = class {
     return matches.length === 1 ? matches[0] : void 0;
   }
   revealGroup(group) {
-    var _a, _b, _c;
-    if (!this.viewport()) return "unavailable";
+    var _a, _b, _c, _d, _e;
+    if (!this.viewport() || ((_b = (_a = this.port).targetsCurrent) == null ? void 0 : _b.call(_a)) === false) return "unavailable";
     if (TaskInspector.hasDirty(this.root.ownerDocument)) return "busy";
-    return (_c = (_b = (_a = this.port).revealGroup) == null ? void 0 : _b.call(_a, group)) != null ? _c : "unavailable";
+    return (_e = (_d = (_c = this.port).revealGroup) == null ? void 0 : _d.call(_c, group)) != null ? _e : "unavailable";
   }
   hit(node, point) {
-    if (!this.current()) return;
+    var _a, _b;
+    if (!this.current() || ((_b = (_a = this.port).targetsCurrent) == null ? void 0 : _b.call(_a)) === false) return;
     const handle = this.port.hit(node, point);
     return handle ? this.handle(handle) : void 0;
   }
   selection() {
-    return this.current() ? this.port.selection().slice(0, 256) : [];
+    var _a, _b;
+    return this.current() && ((_b = (_a = this.port).targetsCurrent) == null ? void 0 : _b.call(_a)) !== false ? this.port.selection().slice(0, 256) : [];
   }
   geometry(target) {
     const viewport = this.viewport();
@@ -1428,7 +1558,8 @@ var TimelineSurface = class {
     }
   }
   reveal(target) {
-    return this.viewport() && ((target == null ? void 0 : target.type) === "item" || (target == null ? void 0 : target.type) === "cell") ? this.port.reveal(target) : "unavailable";
+    var _a, _b;
+    return this.viewport() && ((_b = (_a = this.port).targetsCurrent) == null ? void 0 : _b.call(_a)) !== false && ((target == null ? void 0 : target.type) === "item" || (target == null ? void 0 : target.type) === "cell") ? this.port.reveal(target) : "unavailable";
   }
   rangeContext() {
     return this.current() ? rangeContext(() => {
@@ -1537,6 +1668,7 @@ var TimelineSurface = class {
     (_b = this.stopRange) == null ? void 0 : _b.call(this);
     const cleanup = [];
     let live = true, start, dragged = false;
+    let picker;
     const listen = (target, type, handler) => {
       target.addEventListener(type, handler, true);
       cleanup.push(() => target.removeEventListener(type, handler, true));
@@ -1546,13 +1678,29 @@ var TimelineSurface = class {
       live = false;
       for (const dispose of cleanup) dispose();
       if (this.stopAnnotation === stop) this.stopAnnotation = void 0;
+      picker == null ? void 0 : picker.dispose();
       try {
         stopped();
       } catch (e) {
       }
     };
+    const choose = (handle) => {
+      if (!live || !this.current() || TaskInspector.hasDirty(this.root.ownerDocument) || !handle.current()) return;
+      stop();
+      select(handle);
+    };
     this.stopAnnotation = stop;
+    const viewport = this.viewport();
+    picker = annotationPicker(this.root, () => [...this.handles(), ...this.groups()], choose, stop);
+    cleanup.push(this.onChange(() => {
+      if (!this.current() || this.viewport() !== viewport || !(picker == null ? void 0 : picker.current())) {
+        stop();
+        return;
+      }
+      picker.refresh();
+    }));
     listen(this.root, "pointerdown", (event) => {
+      if (picker == null ? void 0 : picker.contains(event.target)) return;
       const pointer = event;
       start = { clientX: pointer.clientX, clientY: pointer.clientY };
       dragged = false;
@@ -1566,25 +1714,32 @@ var TimelineSurface = class {
       dragged = true;
     });
     listen(this.root, "touchstart", (event) => {
-      event.stopImmediatePropagation();
+      if (!(picker == null ? void 0 : picker.contains(event.target))) event.stopImmediatePropagation();
     });
     for (const type of ["mousedown", "contextmenu"]) listen(this.root, type, (event) => {
-      event.preventDefault();
-      event.stopImmediatePropagation();
+      if (!(picker == null ? void 0 : picker.contains(event.target))) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
     });
     listen(this.root, "click", (event) => {
       var _a2;
+      if (picker == null ? void 0 : picker.contains(event.target)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       const pointer = event;
       if (dragged || !this.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return;
       const handle = event.target && ((_a2 = this.groupHit(event.target)) != null ? _a2 : this.hit(event.target, pointer));
       if (!(handle == null ? void 0 : handle.current())) return;
-      stop();
-      select(handle);
+      choose(handle);
     });
     listen(this.root, "keydown", (event) => {
       if (event.key === "Tab") return;
+      if (picker == null ? void 0 : picker.contains(event.target)) {
+        picker.key(event);
+        event.stopImmediatePropagation();
+        return;
+      }
       event.preventDefault();
       event.stopImmediatePropagation();
       if (event.key === "Escape") stop();
@@ -1599,6 +1754,7 @@ var TimelineSurface = class {
     if (window2) listen(window2, "blur", (event) => {
       if (event.target === window2) stop();
     });
+    picker.focus();
     return stop;
   }
   onChange(listener) {
@@ -1843,11 +1999,11 @@ var HeaderRenderer = class {
       this.createTierCell(currentTierLabel, tierStartPx, endPx - tierStartPx);
     }
   }
-  createTierCell(label, x, w) {
+  createTierCell(label2, x, w) {
     const cell = this.topTierEl.createDiv({ cls: "sabidurian-header-cell sabidurian-header-cell-tier" });
     cell.style.left = `${x}px`;
     cell.style.width = `${Math.max(w, 1)}px`;
-    cell.setText(label);
+    cell.setText(label2);
   }
   get element() {
     return this.headerEl;
@@ -2669,8 +2825,8 @@ var TaskEdgeNavigation = class {
         const icon = this.body.ownerDocument.createElement("span");
         icon.setAttribute("aria-hidden", "true");
         button.append(icon);
-        const label = (_a = entry.displayLabel) != null ? _a : entry.label;
-        (0, import_obsidian2.setTooltip)(button, label, { delay: 100 });
+        const label2 = (_a = entry.displayLabel) != null ? _a : entry.label;
+        (0, import_obsidian2.setTooltip)(button, label2, { delay: 100 });
         if (((_b = entry.icon) == null ? void 0 : _b.kind) === "image") {
           const target = button;
           target.addEventListener("pointerover", (event) => {
@@ -2678,7 +2834,7 @@ var TaskEdgeNavigation = class {
             if (event.pointerType !== "mouse" || event.relatedTarget instanceof target.ownerDocument.defaultView.Node && target.contains(event.relatedTarget)) return;
             const content = target.ownerDocument.createDocumentFragment();
             const caption = target.ownerDocument.createElement("span");
-            caption.textContent = label;
+            caption.textContent = label2;
             prependTaskImage(caption, entry.icon);
             content.append(caption);
             (0, import_obsidian2.displayTooltip)(target, content, { delay: 100 });
@@ -3344,8 +3500,8 @@ var DragManager = class {
           delete fm[orderEndProp];
         }
       });
-      const label = newOrderEnd > newOrder ? `position ${newOrder}\u2013${newOrderEnd}` : `position ${newOrder}`;
-      new import_obsidian3.Notice(`Moved "${entry.label}" to ${label}`, 5e3);
+      const label2 = newOrderEnd > newOrder ? `position ${newOrder}\u2013${newOrderEnd}` : `position ${newOrder}`;
+      new import_obsidian3.Notice(`Moved "${entry.label}" to ${label2}`, 5e3);
       (_c = this.onDragComplete) == null ? void 0 : _c.call(this);
       return;
     }
@@ -5007,7 +5163,7 @@ var DayScale = {
       const m = cur.getUTCMinutes();
       const hourLabel = `${h % 12 || 12} ${h < 12 ? "AM" : "PM"}`;
       const mm = String(m).padStart(2, "0");
-      const label = stepMin >= 60 ? hourLabel : `:${mm}`;
+      const label2 = stepMin >= 60 ? hourLabel : `:${mm}`;
       const dayLabel = cur.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
       let tierLabel;
       let isTierStart;
@@ -5018,7 +5174,7 @@ var DayScale = {
         tierLabel = hourLabel;
         isTierStart = m === 0;
       }
-      cols.push({ start: colStart, end: colEnd, label, tierLabel, isTierStart, contextLabel: dayLabel });
+      cols.push({ start: colStart, end: colEnd, label: label2, tierLabel, isTierStart, contextLabel: dayLabel });
       cur = next;
     }
     return cols;
@@ -5061,10 +5217,10 @@ var WeekScale = {
       next.setUTCDate(next.getUTCDate() + 7);
       const colStart = dateToFracYear(cur);
       const colEnd = dateToFracYear(next);
-      const label = `${months[cur.getUTCMonth()]} ${cur.getUTCDate()}`;
+      const label2 = `${months[cur.getUTCMonth()]} ${cur.getUTCDate()}`;
       const tierLabel = `${months[cur.getUTCMonth()]} ${cur.getUTCFullYear()}`;
       const isTierStart = cur.getUTCDate() <= 7;
-      cols.push({ start: colStart, end: colEnd, label, tierLabel, isTierStart });
+      cols.push({ start: colStart, end: colEnd, label: label2, tierLabel, isTierStart });
       cur = next;
     }
     return cols;
@@ -5201,13 +5357,13 @@ var DecadeScale = {
     const cols = [];
     let decade = Math.floor(start / 10) * 10;
     while (decade <= Math.ceil(end) && cols.length < 500) {
-      const label = `${formatYear(decade)}s`;
+      const label2 = `${formatYear(decade)}s`;
       const centuryStart = Math.floor(decade / 100) * 100;
       const tierLabel = decade <= 0 ? `${Math.ceil((1 - centuryStart) / 100)} cent. BCE` : `${Math.floor(centuryStart / 100) + 1}th cent.`;
       cols.push({
         start: decade,
         end: decade + 10,
-        label,
+        label: label2,
         tierLabel,
         isTierStart: decade % 100 === 0
       });
@@ -5229,19 +5385,19 @@ var CenturyScale = {
     const cols = [];
     let century = Math.floor(start / 100) * 100;
     while (century <= Math.ceil(end) && cols.length < 200) {
-      let label;
+      let label2;
       if (century <= 0) {
-        label = `${Math.ceil((1 - century) / 100)} cent. BCE`;
+        label2 = `${Math.ceil((1 - century) / 100)} cent. BCE`;
       } else {
         const num = Math.floor(century / 100) + 1;
-        label = `${num}th cent.`;
+        label2 = `${num}th cent.`;
       }
       const milStart = Math.floor(century / 1e3) * 1e3;
       const tierLabel = century <= 0 ? `${Math.ceil((1 - milStart) / 1e3)} mil. BCE` : `${Math.floor(milStart / 1e3) + 1} millennium`;
       cols.push({
         start: century,
         end: century + 100,
-        label,
+        label: label2,
         tierLabel,
         isTierStart: century % 1e3 === 0
       });
@@ -5263,17 +5419,17 @@ var MillenniumScale = {
     const cols = [];
     let mil = Math.floor(start / 1e3) * 1e3;
     while (mil <= Math.ceil(end) && cols.length < 100) {
-      let label;
+      let label2;
       if (mil <= 0) {
-        label = `${Math.ceil((1 - mil) / 1e3)} mil. BCE`;
+        label2 = `${Math.ceil((1 - mil) / 1e3)} mil. BCE`;
       } else {
         const num = Math.floor(mil / 1e3) + 1;
-        label = `${num} millennium`;
+        label2 = `${num} millennium`;
       }
       cols.push({
         start: mil,
         end: mil + 1e3,
-        label
+        label: label2
       });
       mil += 1e3;
     }
@@ -5492,6 +5648,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
         var _a2;
         return (_a2 = this.timelineRenderer) == null ? void 0 : _a2.element;
       },
+      targetsCurrent: () => this.data === this.collaborationQuery,
       handles: () => {
         var _a2, _b2;
         return (_b2 = (_a2 = this.barRenderer) == null ? void 0 : _a2.collaborationHandles()) != null ? _b2 : [];
@@ -5541,8 +5698,11 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     if (this.lockUpdateState && !this.pendingViewport && ((_a = this.rootEl) == null ? void 0 : _a.isConnected) && this.timelineRenderer) {
       const next = this.captureLockUpdateState();
       if (next === this.lockUpdateState) {
+        const queryChanged = this.data !== this.collaborationQuery;
+        this.collaborationQuery = this.data;
         const locked = this.config.get("locked");
         this.applyLockState(locked != null ? locked : this.plugin.settings.lockOnMobile && isTouchDevice());
+        if (queryChanged) this.collaboration.changed();
         return;
       }
     }
@@ -5758,6 +5918,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     this.cullingActive = !!this.rangeFocus || visibleEntries.length > CULLING_THRESHOLD;
     this.lastViewportBounds = null;
     this.viewportCuller = new ViewportCuller((row) => this.layoutEngine.getRowY(row));
+    this.collaborationQuery = this.data;
     this.barRenderer = new BarRenderer(
       this.timelineRenderer.svgElement,
       this.plugin.app,
@@ -6316,7 +6477,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
       const labelId = this.config.getAsPropertyId("labelProp");
       const labelValue = readValue(labelId);
       const icon = resolveTaskIcon(fm.icon, this.plugin.app, file.path);
-      const label = iconLabel(labelValue == null || String(labelValue) === "null" || String(labelValue) === "" ? file.basename : String(labelValue), icon);
+      const label2 = iconLabel(labelValue == null || String(labelValue) === "null" || String(labelValue) === "" ? file.basename : String(labelValue), icon);
       const orderedProps = ["barDisplayProp1", "barDisplayProp2", "barDisplayProp3"].map((key) => String(this.config.get(key) || "")).filter(Boolean);
       for (const id of orderedProps) {
         const value = readValue(id);
@@ -6324,10 +6485,10 @@ var SabidurianView = class extends import_obsidian8.BasesView {
       }
       result.push({
         file,
-        label,
+        label: label2,
         icon,
         dateValues: { [this._startPropName]: fm[this._startPropName], [this._endPropName]: fm[this._endPropName] },
-        displayLabel: fullLabel(label, properties, orderedProps.map((id) => id.replace(/^note\./, ""))),
+        displayLabel: fullLabel(label2, properties, orderedProps.map((id) => id.replace(/^note\./, ""))),
         start: effectiveStart,
         end: effectiveEnd,
         startYear,
@@ -6439,12 +6600,12 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     };
   }
   taskFields() {
-    const label = String(this.config.get("labelProp") || "note.Step");
+    const label2 = String(this.config.get("labelProp") || "note.Step");
     return {
       start: this._startPropName,
       end: this._endPropName,
       dependencies: this.depPropName,
-      label: label.startsWith("note.") ? label.slice(5) : "Step",
+      label: label2.startsWith("note.") ? label2.slice(5) : "Step",
       zone: this.timeZone,
       locked: this.plugin.settings.lockedProperty || "locked",
       folder: String(this.config.get("taskFolder") || "")
@@ -6741,8 +6902,8 @@ var SabidurianView = class extends import_obsidian8.BasesView {
       button.setAttribute("aria-pressed", String(locked));
       const icon = button.querySelector(".sabidurian-lock-icon");
       if (icon) (0, import_obsidian8.setIcon)(icon, locked ? "lock" : "unlock");
-      const label = button.querySelector(".sabidurian-lock-label");
-      if (label) label.textContent = locked ? "Locked" : "Editing";
+      const label2 = button.querySelector(".sabidurian-lock-label");
+      if (label2) label2.textContent = locked ? "Locked" : "Editing";
     }
     const create = (_e = this.rootEl) == null ? void 0 : _e.querySelector(".sabidurian-new-task-btn");
     if (create) create.disabled = locked || !this.currentEntries.length;
@@ -7408,6 +7569,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
         var _a2;
         return (_a2 = this.timelineRenderer) == null ? void 0 : _a2.element;
       },
+      targetsCurrent: () => this.data === this.collaborationQuery,
       handles: () => {
         var _a2, _b2;
         return (_b2 = (_a2 = this.barRenderer) == null ? void 0 : _a2.collaborationHandles()) != null ? _b2 : [];
@@ -7654,6 +7816,7 @@ var SequenceView = class extends import_obsidian9.BasesView {
     this.cullingActive = !!this.rangeFocus || visibleEntries.length > CULLING_THRESHOLD2;
     this.lastViewportBounds = null;
     this.viewportCuller = new ViewportCuller((row) => this.layoutEngine.getRowY(row));
+    this.collaborationQuery = this.data;
     this.barRenderer = new BarRenderer(
       this.timelineRenderer.svgElement,
       this.plugin.app,

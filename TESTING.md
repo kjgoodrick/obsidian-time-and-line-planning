@@ -11,7 +11,7 @@ npm ci
 npm run package
 ```
 
-Packaging runs TypeScript checking, the 101-test regression suite, the production build, and creation of a deterministic plugin-only ZIP. The DOM suites use Happy DOM and a small Obsidian API fixture; they do not execute the native Obsidian app. Twenty-nine cases cover the optional [collaboration bridge](COLLABORATION.md), including explicit annotation, exact lane identity and dirty-inspector navigation guards. Team Relay's source interoperability fixture exercises both real view types and load orders with and without grouping; native acceptance and the remaining timeline targets are pending.
+Packaging runs TypeScript checking, the 210-test regression suite, the production build, and creation of a deterministic plugin-only ZIP. The DOM suites use Happy DOM and a small Obsidian API fixture; they do not execute the native Obsidian app. The optional [collaboration bridge](COLLABORATION.md) checks include explicit annotation, exact lane identity, dirty-inspector navigation, range coordinate projection and mouse/touch/keyboard range selection. Team Relay's source interoperability fixture exercises both real view types and load orders with and without grouping, including range selection/projection/navigation; native acceptance, the range comment interface and remaining timeline targets are pending.
 
 Coverage includes:
 

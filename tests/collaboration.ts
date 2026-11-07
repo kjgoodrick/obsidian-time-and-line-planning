@@ -244,3 +244,118 @@ test('disposal invalidates captured handles and notifies independent consumers e
   assert.deepEqual(f.surface.handles(), []); assert.equal(f.surface.reveal({ type: 'item', file: f.files[0] }), 'unavailable');
   f.view.onunload(); assert.deepEqual(f.bridge.getSurfaces(), []);
 });
+
+function rangeLayout(f: ReturnType<typeof fixture>) {
+  const viewport = f.view.timelineRenderer.element as HTMLElement, svg = f.view.timelineRenderer.svgElement as SVGSVGElement;
+  f.view.axis.setView(f.view.type === 'sabidurian-sequence' ? 1 : 2026, f.view.type === 'sabidurian-sequence' ? 5 : 2027, 800);
+  Object.defineProperties(viewport, { clientWidth: { value: 400, configurable: true }, clientHeight: { value: 200, configurable: true }, scrollWidth: { value: 800, configurable: true } });
+  viewport.scrollLeft = 0;
+  viewport.getBoundingClientRect = () => ({ left: 100, right: 500, top: 50, bottom: 250, width: 400, height: 200 } as DOMRect);
+  svg.getBoundingClientRect = () => ({ left: 100 - viewport.scrollLeft, right: 900 - viewport.scrollLeft, top: 50, bottom: 450, width: 800, height: 400 } as DOMRect);
+  return { viewport, svg };
+}
+function rangePointer(target: EventTarget, type: string, x: number, y = 100, pointerType = 'mouse', pointerId = 1) {
+  const event = new win.PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerType, pointerId });
+  target.dispatchEvent(event); return event;
+}
+const ordinal = { version: 1 as const, kind: 'ordinal' as const, start: '1', end: '3', start_inclusive: true, end_inclusive: false, unit: 'property-value' as const };
+
+test('range context follows the live axis, retains scroll, and rejects changed configuration or replaced rendering', () => {
+  const f = fixture('sequence'), { viewport } = rangeLayout(f), context = f.surface.rangeContext()!;
+  assert.ok(context.current()); viewport.scrollLeft = 200; assert.ok(context.current());
+  f.values.orderProp = 'note.other'; assert.equal(context.current(), false);
+  f.values.orderProp = 'note.order'; const next = f.surface.rangeContext()!;
+  f.view.onDataUpdated(); assert.equal(next.current(), false);
+  assert.ok(f.surface.rangeContext()); f.view.onunload(); assert.equal(f.surface.rangeContext(), undefined);
+});
+
+test('range geometry uses current SVG scale and scroll without changing axis or saved settings', () => {
+  const f = fixture('sequence'), { viewport, svg } = rangeLayout(f), context = f.surface.rangeContext()!;
+  const before = JSON.stringify(f.configWrites), geometry = f.surface.rangeGeometry(ordinal, context.axis)!;
+  assert.equal(geometry.startX, 100); assert.equal(geometry.endX, 500); assert.equal(geometry.top, 54);
+  viewport.scrollLeft = 100;
+  assert.equal(f.surface.rangeGeometry(ordinal, context.axis)?.startX, 0);
+  svg.getBoundingClientRect = () => ({ left: 100, right: 1700, top: 50, bottom: 450, width: 1600, height: 400 } as DOMRect);
+  assert.equal(f.surface.rangeGeometry(ordinal, context.axis)?.endX, 900);
+  assert.equal(JSON.stringify(f.configWrites), before); assert.equal(f.writes.length, 0);
+});
+
+test('range mouse drag consumes its compatibility click before returning control to scheduling', () => {
+  const f = fixture('sequence'), { svg } = rangeLayout(f), selections: any[] = []; let normalClicks = 0, stopped = 0;
+  svg.addEventListener('click', () => normalClicks++);
+  const before = JSON.stringify(f.configWrites);
+  f.surface.beginRange('ordinal', 'day', (value: any) => selections.push(value), () => stopped++);
+  rangePointer(svg, 'pointerdown', 100); rangePointer(document, 'pointermove', 500); rangePointer(document, 'pointerup', 500);
+  assert.equal(selections.length, 0);
+  svg.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true, clientX: 500 }));
+  assert.equal(selections.length, 1); assert.equal(stopped, 1); assert.equal(normalClicks, 0);
+  assert.equal(selections[0].draft.start, '1'); assert.equal(selections[0].draft.end, '3'); assert.ok(selections[0].current());
+  assert.equal(document.querySelector('.sabidurian-range-selection-status'), null);
+  svg.dispatchEvent(new win.MouseEvent('click', { bubbles: true, clientX: 500 })); assert.equal(normalClicks, 1);
+  assert.equal(JSON.stringify(f.configWrites), before); assert.equal(f.writes.length, 0);
+});
+
+test('touch pan and pinch retain native defaults and the next two taps select a range', () => {
+  const f = fixture('sequence'), { svg } = rangeLayout(f), selections: any[] = [];
+  f.surface.beginRange('ordinal', 'day', (value: any) => selections.push(value), () => {});
+  assert.equal(rangePointer(svg, 'pointerdown', 150, 100, 'touch').defaultPrevented, false);
+  assert.ok(document.querySelector('.sabidurian-range-selection-status'), 'active after touch start');
+  assert.equal(rangePointer(document, 'pointermove', 300, 100, 'touch').defaultPrevented, false);
+  assert.ok(document.querySelector('.sabidurian-range-selection-status'), 'active after touch pan');
+  rangePointer(document, 'pointerup', 300, 100, 'touch');
+  assert.ok(document.querySelector('.sabidurian-range-selection-status'), 'active after touch release');
+  assert.equal(rangePointer(svg, 'pointerdown', 200, 100, 'touch', 2).defaultPrevented, false);
+  assert.equal(rangePointer(svg, 'pointerdown', 300, 100, 'touch', 3).defaultPrevented, false);
+  assert.equal(rangePointer(document, 'pointermove', 350, 100, 'touch', 3).defaultPrevented, false);
+  rangePointer(document, 'pointerup', 200, 100, 'touch', 2); rangePointer(document, 'pointerup', 350, 100, 'touch', 3);
+  svg.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true, clientX: 350 }));
+  assert.equal(selections.length, 0);
+  for (const x of [200, 400]) {
+    rangePointer(svg, 'pointerdown', x, 100, 'touch'); rangePointer(document, 'pointerup', x, 100, 'touch');
+    svg.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true, clientX: x }));
+    if (x === 200) assert.match(document.querySelector('.sabidurian-range-selection-status')?.textContent ?? 'closed', /End:/);
+  }
+  assert.equal(selections.length, 1); assert.equal(selections[0].draft.start, '1.5'); assert.equal(selections[0].draft.end, '2.5');
+});
+
+test('range selection survives descendant focus changes but cancels when its window loses focus', () => {
+  const f = fixture('sequence'); rangeLayout(f); let stopped = 0;
+  f.surface.beginRange('ordinal', 'day', () => assert.fail('unexpected selection'), () => stopped++);
+  document.querySelector('.sabidurian-range-selection-status')!.dispatchEvent(new win.FocusEvent('blur'));
+  assert.equal(stopped, 0); win.dispatchEvent(new win.FocusEvent('blur'));
+  assert.equal(stopped, 1); assert.equal(document.querySelector('.sabidurian-range-selection-status'), null);
+});
+
+test('keyboard range selection announces values and supports cancellation without any editing', () => {
+  const f = fixture('sequence'); rangeLayout(f); const selections: any[] = [];
+  f.surface.beginRange('ordinal', 'day', (value: any) => selections.push(value), () => {});
+  const status = document.querySelector('.sabidurian-range-selection-status')!;
+  assert.equal(document.activeElement, status); assert.match(status.textContent!, /Sequence range/);
+  status.dispatchEvent(new win.KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter' }));
+  status.dispatchEvent(new win.KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'ArrowRight', shiftKey: true }));
+  status.dispatchEvent(new win.KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter' }));
+  assert.equal(selections.length, 1); assert.equal(selections[0].draft.start, '2'); assert.equal(selections[0].draft.end, '2.2');
+  f.surface.beginRange('ordinal', 'day', () => assert.fail('cancelled selection'), () => {});
+  document.dispatchEvent(new win.KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+  assert.equal(document.querySelector('.sabidurian-comment-range-selection'), null); assert.equal(f.writes.length, 0);
+});
+
+test('range selection refuses dirty inspector input and stale callbacks after unload', () => {
+  const f = fixture('timeline'); rangeLayout(f);
+  const modal = new TaskInspector(f.plugin.app as any, f.files[0] as any,
+    { start: 'start', end: 'end', label: 'title', dependencies: 'blocked-by', zone: 'UTC' }, f.plugin.history as any, false, () => {}, () => {});
+  modal.open(); const input = modal.contentEl.querySelector('input')!; input.value = '2026-11-26T08:05:00';
+  assert.equal(f.surface.beginRange('calendar', 'day', () => assert.fail('dirty capture'), () => {}), undefined);
+  modal.close(); let stopped = 0;
+  f.surface.beginRange('calendar', 'day', () => assert.fail('unloaded capture'), () => stopped++);
+  f.view.onunload(); assert.equal(stopped, 1); assert.equal(document.querySelector('.sabidurian-range-selection-status'), null);
+});
+
+test('range reveal preserves vertical position and fails explicitly for an interval outside the rendered axis', () => {
+  const f = fixture('sequence'), { viewport } = rangeLayout(f), context = f.surface.rangeContext()!;
+  viewport.scrollTop = 123; const before = JSON.stringify(f.configWrites);
+  assert.equal(f.surface.revealRange({ ...ordinal, start: '3', end: '4' }, context.axis), 'revealed');
+  assert.equal(viewport.scrollLeft, 352); assert.equal(viewport.scrollTop, 123);
+  assert.equal(f.surface.revealRange({ ...ordinal, start: '100', end: '101' }, context.axis), 'hidden');
+  assert.equal(viewport.scrollLeft, 352); assert.equal(JSON.stringify(f.configWrites), before);
+});

@@ -1746,3 +1746,23 @@ body.theme-dark {
 }
 .bases-td[data-sabidurian-color] .metadata-input-longtext { padding-inline: 6px; }
 .sabidurian-st-cell [data-sabidurian-color] { padding: 2px 6px; }
+
+/* Explicit comment range selection never captures touch panning. */
+.sabidurian-range-selection-status {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  padding: 0.5em 0.75em;
+  background: var(--background-primary);
+  border: 1px solid var(--interactive-accent);
+  border-radius: var(--radius-s);
+  font-size: var(--font-ui-small);
+}
+.sabidurian-range-selection-status:focus-visible { outline: 2px solid var(--interactive-accent); }
+.sabidurian-range-selection-status [role="status"] { display: block; }
+.sabidurian-comment-range-selection line {
+  stroke: var(--interactive-accent);
+  stroke-width: 2;
+  stroke-dasharray: 5 3;
+  vector-effect: non-scaling-stroke;
+}

@@ -135,6 +135,8 @@ export class SabidurianView extends BasesView {
       revealGroup: group => this.timelineRenderer && this.data.groupedData.includes(group) && this.groupHeaderRenderer?.revealGroup(group, this.timelineRenderer.element) ? 'revealed' : 'unavailable',
       selection: () => this.selectionManager?.getSelectedEntries().map(entry => entry.file) ?? [],
       reveal: target => this.revealDiscussionTarget(target),
+      ranges: () => this.timelineRenderer && this.currentEntries.length ? { axis: this.axis, config: this.config, renderer: 'sabidurian-timeline',
+        svg: this.timelineRenderer.svgElement, viewport: this.timelineRenderer.element, timeZone: this.timeZone } : undefined,
     });
     this.releaseCollaboration = plugin.collaboration?.register(this.collaboration);
     plugin.colorSubscribers?.add(this.refreshColors);

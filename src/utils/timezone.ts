@@ -18,12 +18,13 @@ export function wallMsToAxis(ms: number): number {
 
 export function instantToWallMs(ms: number, zone: string): number {
   const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+    timeZone: zone, calendar: 'gregory', era: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
   }).formatToParts(new Date(ms));
   const p: Record<string, number> = {};
   for (const part of parts) if (part.type !== 'literal') p[part.type] = Number(part.value);
-  return utcMs(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) + ((ms % 1000 + 1000) % 1000);
+  const year = parts.find(part => part.type === 'era')?.value === 'BC' ? 1 - p.year : p.year;
+  return utcMs(year, p.month - 1, p.day, p.hour, p.minute, p.second) + ((ms % 1000 + 1000) % 1000);
 }
 
 /** Reject nonexistent and ambiguous local times rather than silently changing a schedule. */
@@ -45,6 +46,10 @@ export function wallToInstant(ms: number, zone: string, preferredOffset?: number
 
 export function offsetISO(instant: number, zone: string): string {
   const wall = instantToWallMs(instant, zone);
+  // Historical IANA offsets may include seconds, which ISO minute offsets cannot
+  // express. Preserve the instant in UTC instead of rounding into another time.
+  if ((wall - instant) % 60000 !== 0 || new Date(wall).getUTCFullYear() < 1 || new Date(wall).getUTCFullYear() > 9999)
+    return new Date(instant).toISOString();
   const offsetMinutes = Math.round((wall - instant) / 60000);
   const sign = offsetMinutes < 0 ? '-' : '+';
   const abs = Math.abs(offsetMinutes);

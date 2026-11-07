@@ -111,8 +111,11 @@ function wallMsToAxis(ms) {
   return y + (ms - utcMs(y)) / (utcMs(y + 1) - utcMs(y));
 }
 function instantToWallMs(ms, zone) {
+  var _a;
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: zone,
+    calendar: "gregory",
+    era: "short",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -123,7 +126,8 @@ function instantToWallMs(ms, zone) {
   }).formatToParts(new Date(ms));
   const p = {};
   for (const part of parts) if (part.type !== "literal") p[part.type] = Number(part.value);
-  return utcMs(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) + (ms % 1e3 + 1e3) % 1e3;
+  const year = ((_a = parts.find((part) => part.type === "era")) == null ? void 0 : _a.value) === "BC" ? 1 - p.year : p.year;
+  return utcMs(year, p.month - 1, p.day, p.hour, p.minute, p.second) + (ms % 1e3 + 1e3) % 1e3;
 }
 function wallToInstant(ms, zone, preferredOffset) {
   const offsets = /* @__PURE__ */ new Set();
@@ -131,17 +135,19 @@ function wallToInstant(ms, zone, preferredOffset) {
     const probe = ms + hours * 36e5;
     offsets.add(instantToWallMs(probe, zone) - probe);
   }
-  const candidates = [...offsets].map((offset) => ms - offset).filter((instant) => instantToWallMs(instant, zone) === ms);
+  const candidates = [...offsets].map((offset) => ms - offset).filter((instant2) => instantToWallMs(instant2, zone) === ms);
   if (candidates.length === 1) return candidates[0];
   if (preferredOffset != null) {
-    const preferred = candidates.find((instant) => ms - instant === preferredOffset);
+    const preferred = candidates.find((instant2) => ms - instant2 === preferredOffset);
     if (preferred != null) return preferred;
   }
   throw new Error(candidates.length ? "Ambiguous daylight-saving time; enter an explicit UTC offset." : "This local time does not exist because of daylight saving time.");
 }
-function offsetISO(instant, zone) {
-  const wall = instantToWallMs(instant, zone);
-  const offsetMinutes = Math.round((wall - instant) / 6e4);
+function offsetISO(instant2, zone) {
+  const wall = instantToWallMs(instant2, zone);
+  if ((wall - instant2) % 6e4 !== 0 || new Date(wall).getUTCFullYear() < 1 || new Date(wall).getUTCFullYear() > 9999)
+    return new Date(instant2).toISOString();
+  const offsetMinutes = Math.round((wall - instant2) / 6e4);
   const sign = offsetMinutes < 0 ? "-" : "+";
   const abs = Math.abs(offsetMinutes);
   const offset = `${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
@@ -155,8 +161,8 @@ function parseExactTime(value, zone) {
   const [year, month, day, hour, minute, second] = match.slice(1, 7).map((part) => Number(part != null ? part : 0));
   const milliseconds = Number(((_a = match[7]) != null ? _a : "").padEnd(3, "0"));
   const wall = utcMs(year, month - 1, day, hour, minute, second) + milliseconds;
-  const civil = new Date(wall);
-  if (year < 1 || civil.getUTCFullYear() !== year || civil.getUTCMonth() !== month - 1 || civil.getUTCDate() !== day || civil.getUTCHours() !== hour || civil.getUTCMinutes() !== minute || civil.getUTCSeconds() !== second)
+  const civil2 = new Date(wall);
+  if (year < 1 || civil2.getUTCFullYear() !== year || civil2.getUTCMonth() !== month - 1 || civil2.getUTCDate() !== day || civil2.getUTCHours() !== hour || civil2.getUTCMinutes() !== minute || civil2.getUTCSeconds() !== second)
     throw new Error("Invalid calendar date.");
   if (match[8] === "Z") return wall;
   if (match[9]) {
@@ -285,9 +291,9 @@ function parseSabidurianDate(value, timeZone = Intl.DateTimeFormat().resolvedOpt
     return { year: Math.round(value), isHistorical: value < 1 };
   }
   if (value instanceof Date || typeof value === "object" && value.date instanceof Date) {
-    const date = value instanceof Date ? value : value.date;
-    if (isNaN(date.getTime())) return null;
-    const d = new Date(instantToWallMs(date.getTime(), timeZone));
+    const date2 = value instanceof Date ? value : value.date;
+    if (isNaN(date2.getTime())) return null;
+    const d = new Date(instantToWallMs(date2.getTime(), timeZone));
     return {
       year: d.getUTCFullYear(),
       month: d.getUTCMonth(),
@@ -312,9 +318,9 @@ function parseSabidurianDate(value, timeZone = Intl.DateTimeFormat().resolvedOpt
     return { year: y, isHistorical: true };
   }
   if (/[T ]\d{2}:\d{2}.*(?:Z|[+-]\d{2}:?\d{2})$/.test(raw)) {
-    const instant = Date.parse(raw);
-    if (!Number.isFinite(instant)) return null;
-    const d = new Date(instantToWallMs(instant, timeZone));
+    const instant2 = Date.parse(raw);
+    if (!Number.isFinite(instant2)) return null;
+    const d = new Date(instantToWallMs(instant2, timeZone));
     return {
       year: d.getUTCFullYear(),
       month: d.getUTCMonth(),
@@ -483,10 +489,10 @@ function displayDate(value, zone) {
   return parsed ? formatSabidurianDate(parsed) : String(value != null ? value : "");
 }
 var TaskPicker = class extends import_obsidian.FuzzySuggestModal {
-  constructor(app, files, fields, choose) {
+  constructor(app, files, fields2, choose) {
     super(app);
     this.files = files;
-    this.fields = fields;
+    this.fields = fields2;
     this.choose = choose;
     this.setPlaceholder("Find a task by name, dish or date");
   }
@@ -509,10 +515,10 @@ var TaskPicker = class extends import_obsidian.FuzzySuggestModal {
   }
 };
 var _TaskInspector = class _TaskInspector extends import_obsidian.Modal {
-  constructor(app, file, fields, history, locked, refresh, unlock, displayLabel, navigate) {
+  constructor(app, file, fields2, history, locked, refresh, unlock, displayLabel, navigate) {
     super(app);
     this.file = file;
-    this.fields = fields;
+    this.fields = fields2;
     this.history = history;
     this.locked = locked;
     this.refresh = refresh;
@@ -786,16 +792,16 @@ var NewTaskModal = class extends import_obsidian.Modal {
     const propertiesEl = el.createDiv({ cls: "sabidurian-time-fields" });
     const selects = /* @__PURE__ */ new Map();
     const required = new Set((_b = this.options.required) != null ? _b : []);
-    const addSelect = (property, label, choices) => {
-      const field = propertiesEl.createEl("label", { text: required.has(property) ? `${label} (required)` : label });
-      const select = field.createEl("select", { attr: { "aria-label": property } });
-      select.required = required.has(property);
+    const addSelect = (property2, label, choices) => {
+      const field = propertiesEl.createEl("label", { text: required.has(property2) ? `${label} (required)` : label });
+      const select = field.createEl("select", { attr: { "aria-label": property2 } });
+      select.required = required.has(property2);
       select.createEl("option", { value: "", text: "Unassigned" });
       for (const value of new Set(choices.filter((value2) => value2.trim()))) {
         select.createEl("option", { value, text: value });
       }
       select.value = "";
-      selects.set(property, select);
+      selects.set(property2, select);
     };
     addSelect("Dish", "Dish", this.options.dishes);
     addSelect("Active Chef", "Chef", this.options.chefs);
@@ -811,11 +817,11 @@ var NewTaskModal = class extends import_obsidian.Modal {
         const s = parseExactTime(start.value, this.zone), e = parseExactTime(end.value, this.zone);
         if (!name.value.trim() || e <= s) throw new Error("Enter a name and an end after start.");
         const properties = {};
-        for (const [property, select] of selects) if (select.value) properties[property] = select.value;
-        for (const property of required) {
-          if (!properties[property]) {
-            (_a2 = selects.get(property)) == null ? void 0 : _a2.focus();
-            throw new Error(`Choose ${property === "Active Chef" ? "a chef" : property === "Oven Temp" ? "an oven temperature" : property.toLowerCase()} to keep this task visible in this view.`);
+        for (const [property2, select] of selects) if (select.value) properties[property2] = select.value;
+        for (const property2 of required) {
+          if (!properties[property2]) {
+            (_a2 = selects.get(property2)) == null ? void 0 : _a2.focus();
+            throw new Error(`Choose ${property2 === "Active Chef" ? "a chef" : property2 === "Oven Temp" ? "an oven temperature" : property2.toLowerCase()} to keep this task visible in this view.`);
           }
         }
         save.disabled = true;
@@ -832,12 +838,518 @@ var NewTaskModal = class extends import_obsidian.Modal {
   }
 };
 
+// src/collaboration/TimelineRange.ts
+var record = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+function requireValue(condition) {
+  if (!condition) throw new Error("Invalid timeline range");
+}
+function fields(value, keys) {
+  requireValue(Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key)));
+}
+var integer = (value, min, max) => typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
+var leap = (year) => year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+var days = (year, month) => month === 2 ? leap(year) ? 29 : 28 : [4, 6, 9, 11].includes(month) ? 30 : 31;
+var compare = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+function nextDay([year, month, day]) {
+  return day < days(year, month) ? [year, month, day + 1] : month < 12 ? [year, month + 1, 1] : [year + 1, 1, 1];
+}
+function date(value) {
+  requireValue(typeof value === "string" && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(value));
+  const [year, month, day] = value.split("-").map(Number);
+  requireValue(year >= 1 && integer(month, 1, 12) && integer(day, 1, days(year, month)));
+  return [year, month, day];
+}
+function parseTimelineTimeZone(value) {
+  requireValue(typeof value === "string" && value.length <= 128 && /^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)*$/.test(value));
+  return value;
+}
+function validateTimelineTimeZone(value) {
+  const name = parseTimelineTimeZone(value);
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: name });
+  } catch (e) {
+    throw new Error("Unsupported timeline time zone");
+  }
+  return name;
+}
+function instant(value) {
+  var _a;
+  requireValue(typeof value === "string" && value.length <= 29);
+  const match = value.match(/^([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,3}))?(Z|[+-][0-9]{2}:[0-9]{2})$/);
+  requireValue(match);
+  const [year, month, day] = date(match[1]);
+  const hour = Number(match[2]), minute = Number(match[3]), second = Number(match[4]), millis = Number(((_a = match[5]) != null ? _a : "").padEnd(3, "0"));
+  requireValue(hour < 24 && minute < 60 && second < 60 && match[6] !== "-00:00");
+  const suffix = match[6], offsetHour = suffix === "Z" ? 0 : Number(suffix.slice(1, 3)), offsetMinute = suffix === "Z" ? 0 : Number(suffix.slice(4));
+  requireValue(offsetHour < 24 && offsetMinute < 60);
+  const offset = (offsetHour * 60 + offsetMinute) * (suffix.startsWith("-") ? -1 : 1);
+  const civil2 = /* @__PURE__ */ new Date(0);
+  civil2.setUTCFullYear(year, month - 1, day);
+  civil2.setUTCHours(hour, minute, second, millis);
+  const epoch = civil2.getTime() - offset * 6e4, utc = new Date(epoch);
+  requireValue(utc.getUTCFullYear() >= 1 && utc.getUTCFullYear() <= 9999);
+  return { value: `${match[1]}T${match[2]}:${match[3]}:${match[4]}.${String(millis).padStart(3, "0")}${offset === 0 ? "Z" : suffix}`, utc: utc.toISOString(), epoch };
+}
+function historical(value) {
+  requireValue(record(value) && integer(value.year, -1e9, 1e9));
+  if (value.precision === "year") {
+    fields(value, ["precision", "year"]);
+    return { precision: "year", year: value.year };
+  }
+  requireValue(integer(value.month, 1, 12));
+  if (value.precision === "month") {
+    fields(value, ["precision", "year", "month"]);
+    return { precision: "month", year: value.year, month: value.month };
+  }
+  requireValue(value.precision === "day" && integer(value.day, 1, days(value.year, value.month)));
+  fields(value, ["precision", "year", "month", "day"]);
+  return { precision: "day", year: value.year, month: value.month, day: value.day };
+}
+function period(point) {
+  if (point.precision === "year") return [[point.year, 1, 1], [point.year + 1, 1, 1]];
+  if (point.precision === "month") return [[point.year, point.month, 1], point.month < 12 ? [point.year, point.month + 1, 1] : [point.year + 1, 1, 1]];
+  const start = [point.year, point.month, point.day];
+  return [start, nextDay(start)];
+}
+function decimal(value) {
+  requireValue(typeof value === "string" && value.length <= 26 && /^-?(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,9})?$/.test(value));
+  const negative = value.startsWith("-"), [whole, fraction = ""] = (negative ? value.slice(1) : value).split(".");
+  const scaled = BigInt(whole) * BigInt(1e9) + BigInt(fraction.padEnd(9, "0"));
+  const trimmed = fraction.replace(/0+$/, "");
+  return { value: scaled === BigInt(0) ? "0" : (negative ? "-" : "") + whole + (trimmed ? "." + trimmed : ""), scaled: negative ? -scaled : scaled };
+}
+function ordered(start, end, bounds) {
+  requireValue(start < end || start === end && bounds.start_inclusive && bounds.end_inclusive);
+}
+function parseTimelineRange(value) {
+  requireValue(record(value) && value.version === 1 && typeof value.start_inclusive === "boolean" && typeof value.end_inclusive === "boolean");
+  const bounds = { version: 1, start_inclusive: value.start_inclusive, end_inclusive: value.end_inclusive };
+  const common = ["version", "kind", "start", "end", "start_inclusive", "end_inclusive"];
+  if (value.kind === "calendar" || value.kind === "instant") {
+    fields(value, [...common, "time_zone"]);
+    const time_zone = parseTimelineTimeZone(value.time_zone);
+    if (value.kind === "calendar") {
+      const start3 = date(value.start), end3 = date(value.end);
+      requireValue(compare(start3, end3) <= 0 && compare(bounds.start_inclusive ? start3 : nextDay(start3), bounds.end_inclusive ? nextDay(end3) : end3) < 0);
+      return { ...bounds, kind: "calendar", start: value.start, end: value.end, time_zone };
+    }
+    const start2 = instant(value.start), end2 = instant(value.end);
+    ordered(start2.epoch, end2.epoch, bounds);
+    return { ...bounds, kind: "instant", start: start2.value, end: end2.value, time_zone };
+  }
+  if (value.kind === "historical") {
+    fields(value, [...common, "calendar", "year_numbering"]);
+    requireValue(value.calendar === "proleptic-gregorian" && value.year_numbering === "astronomical");
+    const start2 = historical(value.start), end2 = historical(value.end), a = period(start2), b = period(end2);
+    requireValue(compare(a[bounds.start_inclusive ? 0 : 1], b[bounds.end_inclusive ? 1 : 0]) < 0);
+    return { ...bounds, kind: "historical", start: start2, end: end2, calendar: "proleptic-gregorian", year_numbering: "astronomical" };
+  }
+  requireValue(value.kind === "ordinal" && value.unit === "property-value");
+  fields(value, [...common, "unit"]);
+  const start = decimal(value.start), end = decimal(value.end);
+  ordered(start.scaled, end.scaled, bounds);
+  return { ...bounds, kind: "ordinal", start: start.value, end: end.value, unit: "property-value" };
+}
+function timelineRangeLabel(range) {
+  const point = (value) => {
+    const year = value.year > 0 ? String(value.year) : `${1 - value.year} BCE`;
+    return value.precision === "year" ? year : `${String(value.month).padStart(2, "0")}${value.precision === "day" ? "-" + String(value.day).padStart(2, "0") : ""}, ${year}`;
+  };
+  const start = range.kind === "historical" ? point(range.start) : range.start;
+  const end = range.kind === "historical" ? point(range.end) : range.end;
+  return `${range.kind === "ordinal" ? "Sequence" : "Timeline"} range: ${start} \u2013 ${end}${"time_zone" in range ? " \xB7 " + range.time_zone : ""}`;
+}
+
+// src/collaboration/RangeProjection.ts
+var leap2 = (year) => year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+var monthDays = (year, month) => month === 2 ? leap2(year) ? 29 : 28 : [4, 6, 9, 11].includes(month) ? 30 : 31;
+var scale = BigInt(1e9);
+function decimal2(value) {
+  if (!/^-?[0-9]{1,21}(?:\.[0-9]{1,9})?$/.test(value)) throw new Error("Sequence precision is unavailable.");
+  const [whole, fraction = ""] = (value.startsWith("-") ? value.slice(1) : value).split(".");
+  const absolute = BigInt(whole) * scale + BigInt(fraction.padEnd(9, "0"));
+  return value.startsWith("-") ? -absolute : absolute;
+}
+function numberDecimal(value) {
+  if (!Number.isFinite(value) || Math.abs(value) >= 1e21) throw new Error("Sequence coordinate is unavailable.");
+  return value.toFixed(9);
+}
+function property(value) {
+  if (typeof value !== "string" || !value || value.length > 264 || /[\u0000-\u001f\ud800-\udfff]/u.test(value)) return null;
+  const match = value.match(/^(note|file|formula)\.(.+)$/);
+  const name = match ? match[2] : value;
+  return name.length <= 256 ? { source: match ? match[1] : "note", name } : null;
+}
+function axisDescriptor(state) {
+  const sequence = state.renderer === "sabidurian-sequence";
+  const start = property(state.config.get(sequence ? "orderProp" : "startDateProp"));
+  const rawEnd = state.config.get(sequence ? "orderEndProp" : "endDateProp");
+  const end = rawEnd == null || rawEnd === "" ? null : property(rawEnd);
+  if (!start || rawEnd != null && rawEnd !== "" && !end) return;
+  const rawZone = sequence ? null : state.config.get("timeZone") || null;
+  try {
+    const time_zone = rawZone === null ? null : validateTimelineTimeZone(rawZone);
+    return { version: 1, renderer: state.renderer, start_property: start, end_property: end, time_zone };
+  } catch (e) {
+    return;
+  }
+}
+function axisKey(axis) {
+  const prop = (value) => value ? [value.source, value.name] : null;
+  return JSON.stringify([axis.version, axis.renderer, prop(axis.start_property), prop(axis.end_property), axis.time_zone]);
+}
+function rangeContext(read) {
+  var _a;
+  const state = read();
+  if (!state || !state.svg.isConnected || !state.viewport.contains(state.svg)) return;
+  const axis = axisDescriptor(state);
+  if (!axis) return;
+  const effectiveTimeZone = axis.renderer === "sabidurian-sequence" ? null : (_a = state.timeZone) != null ? _a : axis.time_zone;
+  try {
+    if (axis.renderer !== "sabidurian-sequence") validateTimelineTimeZone(effectiveTimeZone);
+  } catch (e) {
+    return;
+  }
+  const key = axisKey(axis), bounds = [state.axis.viewStart, state.axis.viewEnd, state.axis.totalWidth];
+  if (!bounds.every(Number.isFinite) || bounds[1] <= bounds[0] || bounds[2] <= 0) return;
+  Object.freeze(axis.start_property);
+  if (axis.end_property) Object.freeze(axis.end_property);
+  Object.freeze(axis);
+  const kinds = Object.freeze(axis.renderer === "sabidurian-sequence" ? ["ordinal"] : ["calendar", "instant", "historical"]);
+  return { axis, effectiveTimeZone, kinds, current: () => {
+    var _a2, _b, _c, _d;
+    const now = read(), descriptor = now && axisDescriptor(now);
+    return !!now && now.svg === state.svg && now.svg.isConnected && now.viewport === state.viewport && now.viewport.contains(now.svg) && now.axis === state.axis && now.axis.viewStart === bounds[0] && now.axis.viewEnd === bounds[1] && now.axis.totalWidth === bounds[2] && now.denseValues === state.denseValues && ((_b = (_a2 = now.timeZone) != null ? _a2 : descriptor == null ? void 0 : descriptor.time_zone) != null ? _b : null) === ((_d = (_c = state.timeZone) != null ? _c : axis.time_zone) != null ? _d : null) && !!descriptor && axisKey(descriptor) === key;
+  } };
+}
+function civil(year, month = 1, day = 1) {
+  let ordinal = day - 1;
+  for (let i = 1; i < month; i++) ordinal += monthDays(year, i);
+  return year + ordinal / (leap2(year) ? 366 : 365);
+}
+function historicalPeriod(point) {
+  if (point.precision === "year") return [point.year, point.year + 1];
+  const start = civil(point.year, point.month, "day" in point ? point.day : 1);
+  return [start, point.precision === "month" ? civil(point.year, point.month + 1) : civil(point.year, point.month, point.day + 1)];
+}
+function calendarPeriod(value) {
+  const [year, month, day] = value.split("-").map(Number);
+  return [civil(year, month, day), civil(year, month, day + 1)];
+}
+function ordinalPixel(value, state) {
+  const target = decimal2(value), dense = state.denseValues;
+  if (dense) {
+    if (!dense.length || dense.length > 2e4) throw new Error("Sequence value is outside the dense view.");
+    let low = 0, high = dense.length - 1;
+    const at = (index) => decimal2(numberDecimal(dense[index]));
+    if (target < at(low) || target > at(high)) throw new Error("Sequence value is outside the dense view.");
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (at(middle) < target) low = middle + 1;
+      else high = middle;
+    }
+    if (at(low) === target) return state.axis.yearToPixel(low + 1);
+    const before = at(low - 1), after = at(low);
+    if (after <= before) throw new Error("Sequence mapping is ambiguous.");
+    return state.axis.yearToPixel(low + Number(target - before) / Number(after - before));
+  }
+  const start = decimal2(numberDecimal(state.axis.viewStart)), end = decimal2(numberDecimal(state.axis.viewEnd));
+  if (end <= start) throw new Error("Sequence precision is unavailable.");
+  return Number(target - start) / Number(end - start) * state.axis.totalWidth;
+}
+function projectRange(input, state, expected) {
+  var _a;
+  const range = parseTimelineRange(input), descriptor = axisDescriptor(state);
+  if (!descriptor || axisKey(descriptor) !== axisKey(expected) || state.renderer === "sabidurian-sequence" !== (range.kind === "ordinal")) throw new Error("The timeline axis changed.");
+  if (range.kind === "ordinal") return { start: ordinalPixel(range.start, state), end: ordinalPixel(range.end, state), discontinuous: false };
+  const zone = (_a = state.timeZone) != null ? _a : descriptor.time_zone;
+  if ("time_zone" in range && descriptor.time_zone !== null && range.time_zone !== descriptor.time_zone) throw new Error("The range uses a different timezone.");
+  if (range.kind === "calendar" && range.time_zone !== zone) throw new Error("The calendar range uses a different timezone.");
+  let start, end, discontinuous = false;
+  if (range.kind === "instant") {
+    validateTimelineTimeZone(zone);
+    const a = Date.parse(range.start), b = Date.parse(range.end), wallA = instantToWallMs(a, zone), wallB = instantToWallMs(b, zone);
+    start = wallMsToAxis(wallA);
+    end = wallMsToAxis(wallB);
+    discontinuous = wallB - wallA !== b - a;
+  } else {
+    const a = range.kind === "historical" ? historicalPeriod(range.start) : calendarPeriod(range.start);
+    const b = range.kind === "historical" ? historicalPeriod(range.end) : calendarPeriod(range.end);
+    start = a[range.start_inclusive ? 0 : 1];
+    end = b[range.end_inclusive ? 1 : 0];
+  }
+  const output = { start: state.axis.yearToPixel(start), end: state.axis.yearToPixel(end), discontinuous };
+  if (![output.start, output.end].every(Number.isFinite)) throw new Error("Range geometry is unavailable.");
+  return output;
+}
+function historicalAt(value, precision) {
+  const year = Math.floor(value);
+  if (precision === "year") return { precision, year };
+  let days2 = Math.max(0, Math.min((leap2(year) ? 366 : 365) - 1, Math.floor((value - year) * (leap2(year) ? 366 : 365) + 1e-7))), month = 1;
+  while (month < 12 && days2 >= monthDays(year, month)) {
+    days2 -= monthDays(year, month);
+    month++;
+  }
+  return precision === "month" ? { precision, year, month } : { precision, year, month, day: days2 + 1 };
+}
+function draftRange(start, end, state, kind, precision = "day") {
+  var _a, _b;
+  const bounds = { version: 1, kind, start_inclusive: true, end_inclusive: true };
+  if (end < start) [start, end] = [end, start];
+  try {
+    let draft;
+    if (kind === "ordinal") {
+      const ordinal = (value) => {
+        if (!state.denseValues) return numberDecimal(value);
+        const index = Math.round(value) - 1;
+        if (index < 0 || index >= state.denseValues.length) throw new Error("Select an occupied Sequence position or enter exact values.");
+        return numberDecimal(state.denseValues[index]);
+      };
+      draft = { ...bounds, start: ordinal(start), end: ordinal(end), unit: "property-value" };
+    } else if (kind === "historical") draft = { ...bounds, start: historicalAt(start, precision), end: historicalAt(end, precision), calendar: "proleptic-gregorian", year_numbering: "astronomical" };
+    else {
+      const zone = validateTimelineTimeZone((_b = state.timeZone) != null ? _b : (_a = axisDescriptor(state)) == null ? void 0 : _a.time_zone);
+      const format = (value) => {
+        const point = historicalAt(value, "day");
+        if (point.year < 1 || point.year > 9999) throw new Error("Use historical dates for this interval.");
+        return `${String(point.year).padStart(4, "0")}-${String(point.month).padStart(2, "0")}-${String(point.day).padStart(2, "0")}`;
+      };
+      if (kind === "calendar") draft = { ...bounds, start: format(start), end: format(end), time_zone: zone };
+      else {
+        let issue;
+        const exact = (value) => {
+          format(value);
+          const wall = axisToWallMs(value);
+          try {
+            return offsetISO(wallToInstant(wall, zone), zone);
+          } catch (error) {
+            issue = error instanceof Error ? error.message : "Enter an explicit UTC offset.";
+            return new Date(wall).toISOString().slice(0, -1);
+          }
+        };
+        draft = { ...bounds, start: exact(start), end: exact(end), time_zone: zone };
+        if (issue) return { draft, issue };
+      }
+    }
+    return { draft: parseTimelineRange(draft) };
+  } catch (error) {
+    return { issue: error instanceof Error ? error.message : "Enter a valid interval." };
+  }
+}
+
+// src/collaboration/RangeInteraction.ts
+function beginRangeInteraction(root, read, context, kind, precision, select, stopped) {
+  const state = read();
+  if (!state || !context.current() || !context.kinds.includes(kind) || !["year", "month", "day"].includes(precision)) return;
+  const cleanup = [], doc = root.ownerDocument;
+  let live = true, first, cursor = state.viewport.scrollLeft + state.viewport.clientWidth / 2, suppressClick = false;
+  let pendingEnd, clickTimer;
+  let gesture;
+  const pointers = /* @__PURE__ */ new Set();
+  const status = doc.createElement("div");
+  status.className = "sabidurian-range-selection-status";
+  status.tabIndex = 0;
+  status.setAttribute("role", "group");
+  status.setAttribute("aria-label", "Select a comment range");
+  status.textContent = "Choose two endpoints, or drag with a mouse. Arrow keys move; Enter chooses an endpoint. Escape cancels. Touch drag pans.";
+  const feedback = doc.createElement("span");
+  feedback.setAttribute("role", "status");
+  status.append(feedback);
+  root.append(status);
+  const overlay = doc.createElementNS("http://www.w3.org/2000/svg", "g");
+  overlay.classList.add("sabidurian-comment-range-selection");
+  overlay.setAttribute("pointer-events", "none");
+  state.svg.append(overlay);
+  const priorFocus = doc.activeElement;
+  const listen = (target, type, fn) => {
+    target.addEventListener(type, fn, true);
+    cleanup.push(() => target.removeEventListener(type, fn, true));
+  };
+  const stop = () => {
+    var _a;
+    if (!live) return;
+    live = false;
+    if (clickTimer !== void 0) (_a = doc.defaultView) == null ? void 0 : _a.clearTimeout(clickTimer);
+    for (const dispose of cleanup) dispose();
+    overlay.remove();
+    status.remove();
+    if (doc.activeElement === doc.body && (priorFocus == null ? void 0 : priorFocus.isConnected)) priorFocus.focus({ preventScroll: true });
+    try {
+      stopped();
+    } catch (e) {
+    }
+  };
+  const current = () => live && context.current();
+  const local = (x) => {
+    const box = state.svg.getBoundingClientRect();
+    return Math.max(0, Math.min(state.axis.totalWidth, (x - box.left) * state.axis.totalWidth / box.width));
+  };
+  const paint = () => {
+    var _a, _b;
+    overlay.replaceChildren();
+    for (const x of first === void 0 ? [cursor] : [first, cursor]) {
+      const line = doc.createElementNS("http://www.w3.org/2000/svg", "line");
+      line.setAttribute("x1", String(x));
+      line.setAttribute("x2", String(x));
+      line.setAttribute("y1", "0");
+      line.setAttribute("y2", String((_a = state.svg.getAttribute("height")) != null ? _a : "200"));
+      overlay.append(line);
+    }
+    const point = state.axis.pixelToYear(cursor), preview = draftRange(point, point, state, kind, precision);
+    feedback.textContent = (first === void 0 ? " Start: " : " End: ") + ((_b = preview.issue) != null ? _b : preview.draft ? timelineRangeLabel(parseTimelineRange(preview.draft)) : "Enter an endpoint.");
+  };
+  const choose = (position) => {
+    if (!current() || !Number.isFinite(position)) {
+      stop();
+      return;
+    }
+    if (first === void 0) {
+      first = position;
+      cursor = position;
+      paint();
+      return;
+    }
+    const result = draftRange(state.axis.pixelToYear(first), state.axis.pixelToYear(position), state, kind, precision);
+    const selection = { ...result, context, current: () => context.current() };
+    stop();
+    select(selection);
+  };
+  listen(root, "pointerdown", (event) => {
+    var _a, _b;
+    if (!(event.target instanceof ((_b = (_a = doc.defaultView) == null ? void 0 : _a.Node) != null ? _b : Node)) || !state.viewport.contains(event.target)) return;
+    const pointer = event;
+    if (pointer.button !== 0 && pointer.pointerType !== "touch") return;
+    event.stopImmediatePropagation();
+    pointers.add(pointer.pointerId);
+    if (!current()) {
+      stop();
+      return;
+    }
+    if (pointers.size !== 1) {
+      gesture = void 0;
+      suppressClick = true;
+      return;
+    }
+    suppressClick = false;
+    if (pointer.pointerType !== "touch") event.preventDefault();
+    const position = local(pointer.clientX);
+    gesture = { id: pointer.pointerId, touch: pointer.pointerType === "touch", x: pointer.clientX, y: pointer.clientY, position, dragged: false };
+    cursor = position;
+    paint();
+  });
+  listen(doc, "pointermove", (event) => {
+    const pointer = event;
+    if (!gesture || pointer.pointerId !== gesture.id) return;
+    if (!current()) {
+      stop();
+      return;
+    }
+    if (Math.hypot(pointer.clientX - gesture.x, pointer.clientY - gesture.y) > 8) gesture.dragged = true;
+    if (gesture.touch) {
+      if (gesture.dragged) suppressClick = true;
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (gesture.dragged && first === void 0) first = gesture.position;
+    cursor = local(pointer.clientX);
+    paint();
+  });
+  listen(doc, "pointerup", (event) => {
+    var _a;
+    const pointer = event;
+    pointers.delete(pointer.pointerId);
+    if (!gesture || pointer.pointerId !== gesture.id) return;
+    const active = gesture;
+    gesture = void 0;
+    if (active.touch) {
+      if (active.dragged) suppressClick = true;
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (active.dragged || Math.hypot(pointer.clientX - active.x, pointer.clientY - active.y) > 8) {
+      first != null ? first : first = active.position;
+      pendingEnd = local(pointer.clientX);
+      clickTimer = (_a = doc.defaultView) == null ? void 0 : _a.setTimeout(stop, 250);
+    }
+  });
+  listen(doc, "pointercancel", (event) => {
+    pointers.delete(event.pointerId);
+    gesture = void 0;
+    suppressClick = true;
+  });
+  listen(root, "touchstart", (event) => {
+    if (state.viewport.contains(event.target)) event.stopImmediatePropagation();
+  });
+  for (const type of ["mousedown", "contextmenu"]) listen(root, type, (event) => {
+    if (state.viewport.contains(event.target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  });
+  listen(doc, "click", (event) => {
+    if (pendingEnd !== void 0) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const end = pendingEnd;
+      pendingEnd = void 0;
+      choose(end);
+      return;
+    }
+    if (!state.viewport.contains(event.target)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (suppressClick) {
+      suppressClick = false;
+      return;
+    }
+    choose(local(event.clientX));
+  });
+  listen(root, "keydown", (event) => {
+    const key = event;
+    if (key.key === "Tab") return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (key.key === "Escape") {
+      stop();
+      return;
+    }
+    if (!current()) {
+      stop();
+      return;
+    }
+    if (key.key === "Enter" || key.key === " ") {
+      choose(cursor);
+      return;
+    }
+    const direction = key.key === "ArrowLeft" ? -1 : key.key === "ArrowRight" ? 1 : 0;
+    if (direction) {
+      cursor = Math.max(0, Math.min(state.axis.totalWidth, cursor + direction * Math.max(1, state.viewport.clientWidth / 100) * (key.shiftKey ? 10 : 1)));
+      if (cursor < state.viewport.scrollLeft || cursor > state.viewport.scrollLeft + state.viewport.clientWidth) state.viewport.scrollLeft = Math.max(0, cursor - state.viewport.clientWidth / 2);
+      paint();
+    }
+  });
+  listen(doc, "keydown", (event) => {
+    if (event.key === "Escape") stop();
+  });
+  listen(doc, "visibilitychange", () => {
+    if (doc.hidden) stop();
+  });
+  if (doc.defaultView) listen(doc.defaultView, "blur", (event) => {
+    if (event.target === doc.defaultView) stop();
+  });
+  paint();
+  status.focus({ preventScroll: true });
+  return stop;
+}
+
 // src/collaboration/CollaborationBridge.ts
 var TimelineSurface = class {
   constructor(port) {
     this.port = port;
     this.protocolVersion = 1;
-    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal", "annotation", "groups"]);
+    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal", "annotation", "groups", "ranges"]);
     this.listeners = /* @__PURE__ */ new Set();
     this.closed = false;
     this.serial = 0;
@@ -906,12 +1418,94 @@ var TimelineSurface = class {
   reveal(target) {
     return this.viewport() && ((target == null ? void 0 : target.type) === "item" || (target == null ? void 0 : target.type) === "cell") ? this.port.reveal(target) : "unavailable";
   }
+  rangeContext() {
+    return this.current() ? rangeContext(() => {
+      var _a, _b;
+      return this.current() ? (_b = (_a = this.port).ranges) == null ? void 0 : _b.call(_a) : void 0;
+    }) : void 0;
+  }
+  rangeGeometry(range, axis, group) {
+    var _a, _b, _c, _d, _e;
+    try {
+      const context = this.rangeContext(), state = (_b = (_a = this.port).ranges) == null ? void 0 : _b.call(_a);
+      if (!context || !state) return;
+      const projected = projectRange(range, state, axis), svg = state.svg.getBoundingClientRect(), view = state.viewport.getBoundingClientRect();
+      if (svg.width <= 0 || view.width <= 0 || view.height <= 0) return;
+      const groups = group ? this.groups().filter((handle) => handle.target.group === group && handle.current()) : [];
+      if (group && groups.length !== 1) return;
+      const band = (_c = groups[0]) == null ? void 0 : _c.element.getBoundingClientRect();
+      const top = (_d = band == null ? void 0 : band.top) != null ? _d : view.top + 4, bottom = (_e = band == null ? void 0 : band.bottom) != null ? _e : Math.min(view.bottom, top + 24);
+      const startX = svg.left + projected.start / state.axis.totalWidth * svg.width, endX = svg.left + projected.end / state.axis.totalWidth * svg.width;
+      if (![startX, endX, top, bottom].every(Number.isFinite)) return;
+      return {
+        startX,
+        endX,
+        top,
+        bottom,
+        discontinuous: projected.discontinuous,
+        current: () => context.current() && (!groups[0] || groups[0].current())
+      };
+    } catch (e) {
+      return;
+    }
+  }
+  revealRange(range, axis, group) {
+    var _a, _b;
+    if (TaskInspector.hasDirty(this.root.ownerDocument)) return "busy";
+    try {
+      const context = this.rangeContext(), state = (_b = (_a = this.port).ranges) == null ? void 0 : _b.call(_a);
+      if (!context || !state) return "unavailable";
+      const projected = projectRange(range, state, axis), start = Math.min(projected.start, projected.end), end = Math.max(projected.start, projected.end);
+      if (end < 0 || start > state.axis.totalWidth) return "hidden";
+      if (group) {
+        const result = this.revealGroup(group);
+        if (result !== "revealed") return result;
+      }
+      if (!context.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return "busy";
+      state.viewport.scrollLeft = Math.max(0, Math.min(start - Math.min(48, state.viewport.clientWidth / 4), Math.max(0, state.viewport.scrollWidth - state.viewport.clientWidth)));
+      this.changed();
+      return "revealed";
+    } catch (e) {
+      return "unavailable";
+    }
+  }
+  beginRange(kind, precision, select, stopped) {
+    var _a, _b;
+    if (TaskInspector.hasDirty(this.root.ownerDocument)) return;
+    (_a = this.stopAnnotation) == null ? void 0 : _a.call(this);
+    (_b = this.stopRange) == null ? void 0 : _b.call(this);
+    const context = this.rangeContext();
+    if (!context) return;
+    this.activeRange = context;
+    const stop = beginRangeInteraction(
+      this.root,
+      () => {
+        var _a2, _b2;
+        return this.current() && !TaskInspector.hasDirty(this.root.ownerDocument) ? (_b2 = (_a2 = this.port).ranges) == null ? void 0 : _b2.call(_a2) : void 0;
+      },
+      context,
+      kind,
+      precision,
+      (selection) => {
+        if (selection.current() && !TaskInspector.hasDirty(this.root.ownerDocument)) select(selection);
+      },
+      () => {
+        this.stopRange = void 0;
+        this.activeRange = void 0;
+        stopped();
+      }
+    );
+    this.stopRange = stop;
+    if (!stop) this.activeRange = void 0;
+    return stop;
+  }
   /** Explicit one-shot selection mode. Touch keeps native pan/zoom; schedule
    * handlers never receive the gesture, compatibility mouse event or key. */
   beginAnnotation(select, stopped) {
-    var _a;
+    var _a, _b;
     if (!this.current() || TaskInspector.hasDirty(this.root.ownerDocument)) return;
     (_a = this.stopAnnotation) == null ? void 0 : _a.call(this);
+    (_b = this.stopRange) == null ? void 0 : _b.call(this);
     const cleanup = [];
     let live = true, start, dragged = false;
     const listen = (target, type, handler) => {
@@ -973,7 +1567,9 @@ var TimelineSurface = class {
       if (this.root.ownerDocument.hidden) stop();
     });
     const window2 = this.root.ownerDocument.defaultView;
-    if (window2) listen(window2, "blur", () => stop());
+    if (window2) listen(window2, "blur", (event) => {
+      if (event.target === window2) stop();
+    });
     return stop;
   }
   onChange(listener) {
@@ -985,7 +1581,9 @@ var TimelineSurface = class {
     };
   }
   changed() {
+    var _a;
     if (this.closed) return;
+    if (this.activeRange && !this.activeRange.current()) (_a = this.stopRange) == null ? void 0 : _a.call(this);
     this.serial++;
     for (const listener of [...this.listeners]) {
       try {
@@ -995,9 +1593,10 @@ var TimelineSurface = class {
     }
   }
   dispose() {
-    var _a;
+    var _a, _b;
     if (this.closed) return;
     (_a = this.stopAnnotation) == null ? void 0 : _a.call(this);
+    (_b = this.stopRange) == null ? void 0 : _b.call(this);
     this.closed = true;
     this.serial++;
     for (const listener of [...this.listeners]) {
@@ -1105,8 +1704,8 @@ var NumericAxis = class {
 
 // src/scale/TimeScale.ts
 var SCALES = [];
-function registerScale(scale) {
-  SCALES.push(scale);
+function registerScale(scale2) {
+  SCALES.push(scale2);
   SCALES.sort((a, b) => a.unitDurationYears - b.unitDurationYears);
 }
 function autoSelectScale(yearRange, pixelWidth) {
@@ -1115,11 +1714,11 @@ function autoSelectScale(yearRange, pixelWidth) {
   const targetUnitYears = yearRange / targetColumns;
   let best = SCALES[0];
   let bestDist = Infinity;
-  for (const scale of SCALES) {
-    const dist = Math.abs(Math.log(scale.unitDurationYears) - Math.log(targetUnitYears));
+  for (const scale2 of SCALES) {
+    const dist = Math.abs(Math.log(scale2.unitDurationYears) - Math.log(targetUnitYears));
     if (dist < bestDist) {
       bestDist = dist;
-      best = scale;
+      best = scale2;
     }
   }
   return best;
@@ -1408,25 +2007,25 @@ var COLOR_TONES = ["gray", "brown", "orange", "yellow", "green", "blue", "purple
 function normalizePropertyColors(value) {
   const result = /* @__PURE__ */ Object.create(null);
   if (!value || typeof value !== "object" || Array.isArray(value)) return result;
-  for (const [property, entries] of Object.entries(value)) {
+  for (const [property2, entries] of Object.entries(value)) {
     if (!entries || typeof entries !== "object" || Array.isArray(entries)) continue;
     const values = /* @__PURE__ */ Object.create(null);
     for (const [name, tone] of Object.entries(entries)) {
       if (COLOR_TONES.includes(tone)) values[name] = tone;
     }
-    result[property] = values;
+    result[property2] = values;
   }
   return result;
 }
-function getPropertyTone(property, value, colors = {}) {
+function getPropertyTone(property2, value, colors = {}) {
   var _a;
-  const tone = (_a = colors == null ? void 0 : colors[property.replace(/^note\./, "")]) == null ? void 0 : _a[value.trim()];
+  const tone = (_a = colors == null ? void 0 : colors[property2.replace(/^note\./, "")]) == null ? void 0 : _a[value.trim()];
   return COLOR_TONES.includes(tone) ? tone : void 0;
 }
-function getColorForValue(value, property = "", colors = {}) {
+function getColorForValue(value, property2 = "", colors = {}) {
   var _a;
   const trimmed = (_a = value == null ? void 0 : value.trim()) != null ? _a : "";
-  const tone = getPropertyTone(property, trimmed, colors);
+  const tone = getPropertyTone(property2, trimmed, colors);
   if (tone) return `var(--sabidurian-tone-${tone})`;
   if (/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.test(trimmed)) return "#" + trimmed.replace(/^#/, "");
   if (!trimmed) return "var(--sabidurian-tone-gray)";
@@ -1536,8 +2135,8 @@ var BarRenderer = class {
   /** Configure property badge display. Call before render(). */
   setDisplayProps(props, minWidth, enabled) {
     this.displayPropertyIds.clear();
-    this.displayProps = props.filter(Boolean).slice(0, 3).map((property) => {
-      const id = /^(?:note|file|formula)\./.test(property) ? property : "note." + property;
+    this.displayProps = props.filter(Boolean).slice(0, 3).map((property2) => {
+      const id = /^(?:note|file|formula)\./.test(property2) ? property2 : "note." + property2;
       const key = id.replace(/^note\./, "");
       const previous = this.displayPropertyIds.get(key);
       this.displayPropertyIds.set(key, previous === void 0 || previous === id ? id : null);
@@ -1655,15 +2254,15 @@ var BarRenderer = class {
       return ((_a2 = el.getComputedTextLength) == null ? void 0 : _a2.call(el)) || Math.max(0, labelWidth((_b2 = el.textContent) != null ? _b2 : "") - 20);
     };
     let labelRight = labelX + measure(text);
-    for (const property of props) {
-      const value = entry.properties[property];
+    for (const property2 of props) {
+      const value = entry.properties[property2];
       const badge = document.createElementNS(SVG_NS2, "g");
       badge.classList.add("sabidurian-property-badge");
-      badge.dataset.property = property;
+      badge.dataset.property = property2;
       this.propertyNodes.add(badge);
-      const propertyId = this.displayPropertyIds.get(property);
+      const propertyId = this.displayPropertyIds.get(property2);
       if (propertyId) this.bindTarget(badge, { type: "cell", file: entry.file, property: propertyId });
-      badge.dataset.sabidurianColor = (_b = getPropertyTone(property, value, this.propertyColors)) != null ? _b : "gray";
+      badge.dataset.sabidurianColor = (_b = getPropertyTone(property2, value, this.propertyColors)) != null ? _b : "gray";
       const bg = document.createElementNS(SVG_NS2, "rect");
       bg.setAttribute("x", `${labelRight + 7}`);
       bg.setAttribute("y", `${y + 4}`);
@@ -2383,7 +2982,7 @@ var EDGE_THRESHOLD = 14;
 var MIN_DRAG_PX = 4;
 var MIN_BAR_YEARS = 2e-3;
 var DragManager = class {
-  constructor(svg, wrapperEl, app, axis, scale) {
+  constructor(svg, wrapperEl, app, axis, scale2) {
     this.locked = false;
     this.detachListeners = [];
     this.scheduling = null;
@@ -2470,7 +3069,7 @@ var DragManager = class {
     this.wrapperEl = wrapperEl;
     this.app = app;
     this.axis = axis;
-    this.scale = scale;
+    this.scale = scale2;
     this.ctx.dateLabelEl = wrapperEl.createDiv({ cls: "sabidurian-drag-date-label" });
     this.ctx.dateLabelEl.style.display = "none";
   }
@@ -2784,8 +3383,8 @@ var DragManager = class {
    *     precision on date-only entries)
    */
   precisionForEntry(entry, which) {
-    const date = which === "start" ? entry.start : entry.end;
-    const origPrecision = date ? getDatePrecision(date) : "day";
+    const date2 = which === "start" ? entry.start : entry.end;
+    const origPrecision = date2 ? getDatePrecision(date2) : "day";
     return maxPrecision(origPrecision, this.scaleWritePrecision());
   }
   /** Set callback for when a drag operation completes (triggers re-render). */
@@ -3309,7 +3908,7 @@ var DependencyPicker = class extends import_obsidian7.FuzzySuggestModal {
   }
 };
 var ContextMenuManager = class {
-  constructor(svg, app, axis, scale) {
+  constructor(svg, app, axis, scale2) {
     this.detachListeners = [];
     this.dependencyProperty = "blocked-by";
     this.viewLocked = false;
@@ -3326,7 +3925,7 @@ var ContextMenuManager = class {
     this.svg = svg;
     this.app = app;
     this.axis = axis;
-    this.scale = scale;
+    this.scale = scale2;
   }
   attach(entries, getRowY) {
     this.entries = entries;
@@ -3441,11 +4040,11 @@ var ContextMenuManager = class {
     const scaleSubmenu = menu.addItem(
       (item) => item.setTitle("Change scale").setIcon("zoom-in")
     );
-    for (const scale of SCALES) {
+    for (const scale2 of SCALES) {
       menu.addItem(
-        (item) => item.setTitle(`  ${scale.label}${scale.id === this.scale.id ? " \u2713" : ""}`).onClick(() => {
+        (item) => item.setTitle(`  ${scale2.label}${scale2.id === this.scale.id ? " \u2713" : ""}`).onClick(() => {
           var _a;
-          (_a = this.onChangeScale) == null ? void 0 : _a.call(this, scale.id);
+          (_a = this.onChangeScale) == null ? void 0 : _a.call(this, scale2.id);
         })
       );
     }
@@ -4018,8 +4617,8 @@ function formatMeasureDuration(a, b) {
   const afterMonths = (months2) => {
     const monthStart = new Date(utcMs(first.getUTCFullYear(), first.getUTCMonth() + months2));
     const year = monthStart.getUTCFullYear(), month = monthStart.getUTCMonth();
-    const days = new Date(utcMs(year, month + 1, 0)).getUTCDate();
-    return utcMs(year, month, Math.min(first.getUTCDate(), days), first.getUTCHours(), first.getUTCMinutes(), first.getUTCSeconds()) + first.getUTCMilliseconds();
+    const days2 = new Date(utcMs(year, month + 1, 0)).getUTCDate();
+    return utcMs(year, month, Math.min(first.getUTCDate(), days2), first.getUTCHours(), first.getUTCMinutes(), first.getUTCSeconds()) + first.getUTCMilliseconds();
   };
   let months = (last.getUTCFullYear() - first.getUTCFullYear()) * 12 + last.getUTCMonth() - first.getUTCMonth();
   if (afterMonths(months) > end) months--;
@@ -4613,8 +5212,8 @@ registerScale(MillenniumScale);
 // src/viewOptions.ts
 function getViewOptions(config) {
   const scaleOptions = { auto: "Auto" };
-  for (const scale of SCALES) {
-    scaleOptions[scale.id] = scale.label;
+  for (const scale2 of SCALES) {
+    scaleOptions[scale2.id] = scale2.label;
   }
   return [
     { type: "property", key: "labelProp", displayName: "Task label (property or formula)" },
@@ -4838,7 +5437,15 @@ var SabidurianView = class extends import_obsidian8.BasesView {
         var _a2, _b2;
         return (_b2 = (_a2 = this.selectionManager) == null ? void 0 : _a2.getSelectedEntries().map((entry) => entry.file)) != null ? _b2 : [];
       },
-      reveal: (target) => this.revealDiscussionTarget(target)
+      reveal: (target) => this.revealDiscussionTarget(target),
+      ranges: () => this.timelineRenderer && this.currentEntries.length ? {
+        axis: this.axis,
+        config: this.config,
+        renderer: "sabidurian-timeline",
+        svg: this.timelineRenderer.svgElement,
+        viewport: this.timelineRenderer.element,
+        timeZone: this.timeZone
+      } : void 0
     });
     this.releaseCollaboration = (_a = plugin.collaboration) == null ? void 0 : _a.register(this.collaboration);
     (_b = plugin.colorSubscribers) == null ? void 0 : _b.add(this.refreshColors);
@@ -5756,13 +6363,13 @@ var SabidurianView = class extends import_obsidian8.BasesView {
   async createTask(name, start, end, properties = {}) {
     var _a, _b;
     if (this._locked) return;
-    const fields = this.taskFields();
-    const folder = fields.folder || ((_b = (_a = this.currentEntries[0]) == null ? void 0 : _a.file.parent) == null ? void 0 : _b.path) || "";
+    const fields2 = this.taskFields();
+    const folder = fields2.folder || ((_b = (_a = this.currentEntries[0]) == null ? void 0 : _a.file.parent) == null ? void 0 : _b.path) || "";
     const safeName = name.replace(/[\\/:*?"<>|]/g, "-");
     const prefix = `${folder ? folder + "/" : ""}${safeName}`;
     let path = `${prefix}.md`, suffix = 2;
     while (this.plugin.app.vault.getAbstractFileByPath(path)) path = `${prefix} ${suffix++}.md`;
-    const fm = { ...properties, [fields.label]: name, [fields.start]: start, [fields.end]: end };
+    const fm = { ...properties, [fields2.label]: name, [fields2.start]: start, [fields2.end]: end };
     const content = "---\n" + Object.entries(fm).map(([k, v]) => `${JSON.stringify(k)}: ${JSON.stringify(v)}`).join("\n") + "\n---\n";
     const file = await this.plugin.app.vault.create(path, content);
     this.plugin.history.recordCreation(file, content, (f) => this.plugin.app.vault.read(f), (f) => this.plugin.app.vault.trash(f, true));
@@ -5824,9 +6431,9 @@ var SabidurianView = class extends import_obsidian8.BasesView {
     }
     const scaleControl = controlsEl.createSpan({ cls: "sabidurian-scale-control" });
     const scaleSelect = scaleControl.createEl("select", { cls: "sabidurian-scale-select" });
-    for (const scale of SCALES) {
-      const opt = scaleSelect.createEl("option", { value: scale.id, text: scale.label });
-      if (this.currentScale && scale.id === this.currentScale.id) {
+    for (const scale2 of SCALES) {
+      const opt = scaleSelect.createEl("option", { value: scale2.id, text: scale2.label });
+      if (this.currentScale && scale2.id === this.currentScale.id) {
         opt.selected = true;
       }
     }
@@ -5918,8 +6525,8 @@ var SabidurianView = class extends import_obsidian8.BasesView {
           this.resolveDependencies(fm == null ? void 0 : fm[depProperty]),
           propertyIds.map((id) => {
             const value = entry.getValue(id);
-            const date = value instanceof Date ? value : value == null ? void 0 : value.date;
-            return [id, value == null ? null : String(value), date instanceof Date ? date.getTime() : null];
+            const date2 = value instanceof Date ? value : value == null ? void 0 : value.date;
+            return [id, value == null ? null : String(value), date2 instanceof Date ? date2.getTime() : null];
           })
         ];
       }),
@@ -5988,8 +6595,8 @@ var SabidurianView = class extends import_obsidian8.BasesView {
    */
   entryWritePrecision(entry, which) {
     var _a, _b;
-    const date = which === "start" ? entry.start : entry.end;
-    const origPrecision = date ? getDatePrecision(date) : "day";
+    const date2 = which === "start" ? entry.start : entry.end;
+    const origPrecision = date2 ? getDatePrecision(date2) : "day";
     const scalePrecision = (_b = (_a = this.currentScale) == null ? void 0 : _a.writePrecision) != null ? _b : "day";
     return maxPrecision(origPrecision, scalePrecision);
   }
@@ -6087,7 +6694,7 @@ var TAP_MOVE_THRESHOLD = 10;
 var EDGE_THRESHOLD2 = 20;
 var MIN_BAR_YEARS2 = 2e-3;
 var TouchManager = class {
-  constructor(svg, wrapperEl, app, axis, scale) {
+  constructor(svg, wrapperEl, app, axis, scale2) {
     this.scheduling = null;
     this.persist = null;
     this.entries = [];
@@ -6110,7 +6717,7 @@ var TouchManager = class {
     this.wrapperEl = wrapperEl;
     this.app = app;
     this.axis = axis;
-    this.scale = scale;
+    this.scale = scale2;
     this.ctx = this.freshContext();
     this.ctx.dateLabelEl = wrapperEl.createDiv({ cls: "sabidurian-drag-date-label sabidurian-touch-date-label" });
     this.ctx.dateLabelEl.style.display = "none";
@@ -6477,8 +7084,8 @@ var TouchManager = class {
     return (_a = this.scale.writePrecision) != null ? _a : "day";
   }
   precisionForEntry(entry, which) {
-    const date = which === "start" ? entry.start : entry.end;
-    const origPrecision = date ? getDatePrecision(date) : "day";
+    const date2 = which === "start" ? entry.start : entry.end;
+    const origPrecision = date2 ? getDatePrecision(date2) : "day";
     return maxPrecision(origPrecision, this.scaleWritePrecision());
   }
   freshContext() {
@@ -6634,7 +7241,15 @@ var SequenceView = class extends import_obsidian9.BasesView {
         var _a2, _b2;
         return (_b2 = (_a2 = this.selectionManager) == null ? void 0 : _a2.getSelectedEntries().map((entry) => entry.file)) != null ? _b2 : [];
       },
-      reveal: (target) => this.revealDiscussionTarget(target)
+      reveal: (target) => this.revealDiscussionTarget(target),
+      ranges: () => this.timelineRenderer && this.currentEntries.length ? {
+        axis: this.axis,
+        config: this.config,
+        renderer: "sabidurian-sequence",
+        svg: this.timelineRenderer.svgElement,
+        viewport: this.timelineRenderer.element,
+        denseValues: this._denseToSparse
+      } : void 0
     });
     this.releaseCollaboration = (_a = plugin.collaboration) == null ? void 0 : _a.register(this.collaboration);
     (_b = plugin.colorSubscribers) == null ? void 0 : _b.add(this.refreshColors);
@@ -7509,9 +8124,9 @@ var SabidurianSettingTab = class extends import_obsidian10.PluginSettingTab {
     });
     containerEl.createEl("h3", { text: "Property colors" });
     containerEl.createEl("p", { text: "Use the same muted color for a value in timeline bars, badges and editable Bases tables." });
-    for (const [property, values] of Object.entries(this.plugin.settings.propertyColors)) {
+    for (const [property2, values] of Object.entries(this.plugin.settings.propertyColors)) {
       for (const [value, tone] of Object.entries(values)) {
-        new import_obsidian10.Setting(containerEl).setName(value).setDesc(property).addDropdown((dropdown) => {
+        new import_obsidian10.Setting(containerEl).setName(value).setDesc(property2).addDropdown((dropdown) => {
           for (const color of COLOR_TONES) dropdown.addOption(color, color[0].toUpperCase() + color.slice(1));
           dropdown.setValue(tone).onChange(async (color) => {
             values[value] = color;
@@ -7712,10 +8327,10 @@ var NativeTableColors = class {
     const Observer = root.ownerDocument.defaultView.MutationObserver;
     this.observer = new Observer((records) => {
       const cells = /* @__PURE__ */ new Set();
-      for (const record of records) {
-        const cell = this.closestCell(record.target);
+      for (const record2 of records) {
+        const cell = this.closestCell(record2.target);
         if (cell) cells.add(cell);
-        for (const node of Array.from(record.addedNodes)) this.collectCells(node, cells);
+        for (const node of Array.from(record2.addedNodes)) this.collectCells(node, cells);
       }
       this.prune();
       for (const cell of cells) if (this.root.contains(cell)) this.colorCell(cell);
@@ -7761,11 +8376,11 @@ var NativeTableColors = class {
   }
   colorCell(cell) {
     var _a, _b, _c, _d;
-    const property = ((_a = cell.getAttribute("data-property")) != null ? _a : "").replace(/^note\./, "");
+    const property2 = ((_a = cell.getAttribute("data-property")) != null ? _a : "").replace(/^note\./, "");
     const content = cell.querySelector(":scope > .bases-table-cell.bases-metadata-value");
     const desired = /* @__PURE__ */ new Map();
     const add = (element, value) => {
-      const color = value.trim() ? this.resolve(property, value.trim()) : null;
+      const color = value.trim() ? this.resolve(property2, value.trim()) : null;
       if (color && /^[a-z][a-z0-9-]*$/.test(color)) desired.set(element, color);
     };
     if (content) {
@@ -7830,7 +8445,7 @@ var SabidurianPlugin = class extends import_obsidian11.Plugin {
     const connectColors = (doc) => {
       if (!this.tableColors.has(doc)) this.tableColors.set(doc, new NativeTableColors(
         doc.body,
-        (property, value) => getPropertyTone(property, value, this.settings.propertyColors)
+        (property2, value) => getPropertyTone(property2, value, this.settings.propertyColors)
       ));
     };
     connectColors(document);

@@ -5,7 +5,7 @@ The planning fork exposes a versioned local integration bridge for
 targeting, selection, visible geometry, guarded navigation, explicit annotation
 selection and lifecycle notifications. Team Relay's development consumer connects
 these to its saved-view comment controls. It does **not** yet provide the complete
-timeline comment feature: ranges, shared calendar markers, presence and native
+timeline comment feature: the range composer/decorations, shared calendar markers, presence and native
 desktop/mobile acceptance remain. Lane headers now expose exact query group
 objects; the consumer derives typed targets with its existing authorization.
 
@@ -35,7 +35,7 @@ hold at the point of use. Closing either the view or bridge invalidates handles.
 ## Targets and geometry
 
 The advertised capabilities are `item`, `cell`, `selection`, `geometry`,
-`reveal`, `annotation`, and `groups`. Only registered renderer objects supply handles; text labels, SVG row
+`reveal`, `annotation`, `groups`, and `ranges`. Only registered renderer objects supply handles; text labels, SVG row
 order, CSS selectors and file-path attributes are not used as durable identities.
 
 | Target | Local identity |
@@ -81,6 +81,41 @@ one with identical text. The consumer refuses navigation when the same typed
 value has more than one distinct header. Formula groups and unsupported metadata
 remain subject to the consumer's capability and dependency-authorization gates.
 
+## Range bridge
+
+The optional `ranges` capability adds `rangeContext`, `beginRange`,
+`rangeGeometry` and `revealRange`. A current context captures the axis descriptor,
+effective timezone and supported semantic kinds. The descriptor retains full
+property namespaces and configured timezone; the consumer must independently
+bind it to the authorized saved-view axis ID/revision. No local bridge result is
+a durable identity or permission grant.
+
+`beginRange(kind, historicalPrecision, select, stopped)` supports mouse drag,
+two clicks/taps and keyboard endpoints. Arrow keys move the endpoint, Shift uses
+a larger step, Enter/Space chooses it, and Escape cancels. Touch pan/pinch keep
+their default behavior; the compatibility click cannot edit a schedule.
+Window blur, hidden document, axis replacement and unload clean up selection.
+Descendant focus changes do not count as window blur. The callback returns a
+bounded editable draft, not a committed annotation; ambiguous DST times retain
+an explicit issue requiring offset confirmation. Consumer cancellation must
+suppress late callbacks, while ordinary provider cleanup may precede delivery.
+
+Coordinates reuse the server/client version-one corpus. Calendar and historical
+closed endpoints cover the whole stated period. Historical years use arithmetic
+Gregorian periods, including astronomical year zero, without Date limits.
+Sequence stores property values; dense projection maps through occupied values
+and never persists a visual index. Decimal differences are calculated before
+conversion to a pixel ratio. Exact instants retain their offsets; civil-axis DST
+endpoint discontinuities are flagged. Historical second-based timezone offsets
+use a UTC serialization when a minute offset would change the instant.
+
+Geometry returns viewport coordinates and a lifetime check, with an optional
+exact query group for a lane band. The consumer owns markers and clipping.
+`revealRange` scrolls the existing axis and preserves settings; a range outside
+that rendered domain returns `hidden`. It does not yet expand the axis for
+navigation. The bridge itself has no range-comment toolbar or confirmation
+dialog, saved comment decorations, persistence, presence or shared milestones.
+
 ## Navigation safety
 
 `reveal(target)` returns `revealed`, `hidden`, `property-hidden`, `ambiguous`,
@@ -119,8 +154,8 @@ keyboard accessibility and native host acceptance remain release gates.
 
 ## Verification and remaining work
 
-`npm run package` passes 101 synthetic regressions, TypeScript checking, production
-build and deterministic plugin-only packaging. The 29 bridge cases use the real
+`npm run package` passes 210 synthetic regressions, TypeScript checking, production
+build and deterministic plugin-only packaging. The bridge cases use the real
 Timeline/Sequence views and renderers with the existing Happy DOM host adapter.
 They cover item/badge identity, aliases, re-render/rename, coordinate hit testing,
 viewport clipping, selection preservation, collapsed groups, dirty inspector
@@ -129,7 +164,10 @@ suppression, blur/visibility cleanup, exact lane identity, collapsed-lane
 selection/navigation, equal labels, query replacement and disposal. Team Relay also has a source
 interoperability script that bundles both plugins' real view/bridge/client/adapter
 code against a synthetic Obsidian host, covering both view types and load orders,
-including typed lane source capture. Separate actual-service checks cover group
+including typed lane source capture and range selection/projection/navigation.
+Range regressions additionally cover the shared coordinate corpus, exact decimal
+projection, dense values, DST ambiguity, CE/BCE boundary conversion, mouse/touch/
+keyboard selection and no scheduling writes. Separate actual-service checks cover group
 authorization and offline recovery in both saved-view types; these do not replace
 the native interaction matrix.
 

@@ -143,6 +143,7 @@ export class SabidurianView extends BasesView {
       selection: () => this.selectionManager?.getSelectedEntries().map(entry => entry.file) ?? [],
       reveal: target => this.revealDiscussionTarget(target),
       ranges: () => this.rangeState(),
+      localMarkers: () => this.plugin.settings.markers,
       focusRange: (range, axis) => this.focusDiscussionRange(range, axis),
       rangeScrolled: () => this.finishRangeNavigation(),
     });

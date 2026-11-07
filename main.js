@@ -1532,13 +1532,77 @@ function presenceRange(start, end, state) {
   }
 }
 
+// src/collaboration/LocalMarkers.ts
+var idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function identifyLocalMarkers(markers, createId = () => crypto.randomUUID()) {
+  let changed = false;
+  const used = /* @__PURE__ */ new Set();
+  const reserved = new Set(markers.filter((marker) => typeof (marker == null ? void 0 : marker.id) === "string" && idPattern.test(marker.id)).map((marker) => marker.id.toLowerCase()));
+  for (const marker of markers) {
+    if (!marker || typeof marker !== "object") continue;
+    if (!marker.id || !idPattern.test(marker.id) || used.has(marker.id.toLowerCase())) {
+      let id;
+      for (let attempt = 0; attempt < 16; attempt++) {
+        const candidate = createId();
+        if (idPattern.test(candidate) && !reserved.has(candidate.toLowerCase())) {
+          id = candidate;
+          break;
+        }
+      }
+      if (!id) throw new Error("Unable to create a unique local marker identity.");
+      marker.id = id;
+      reserved.add(id.toLowerCase());
+      changed = true;
+    }
+    used.add(marker.id.toLowerCase());
+  }
+  return changed;
+}
+function snapshot(marker) {
+  if (!marker || typeof marker.id !== "string" || !idPattern.test(marker.id) || typeof marker.label !== "string" || marker.label.length > 512 || typeof marker.color !== "string" || marker.color.length > 256 || typeof marker.enabled !== "boolean" || [marker.date, marker.start, marker.end].some((value) => value !== void 0 && (typeof value !== "string" || value.length > 128))) {
+    throw new Error("A local marker needs repair in Time & Line settings.");
+  }
+  return {
+    id: marker.id.toLowerCase(),
+    label: marker.label,
+    color: marker.color,
+    enabled: marker.enabled,
+    ...marker.date === void 0 ? {} : { date: marker.date },
+    ...marker.start === void 0 ? {} : { start: marker.start },
+    ...marker.end === void 0 ? {} : { end: marker.end }
+  };
+}
+function localMarkerSnapshots(read, current) {
+  const markers = read();
+  if (!current()) return [];
+  if (!Array.isArray(markers) || markers.length > 256) throw new Error("Local marker selection supports at most 256 markers.");
+  const values = markers.map(snapshot), ids = new Set(values.map((value) => value.id));
+  if (ids.size !== values.length) throw new Error("Local marker identities are ambiguous. Reopen Time & Line.");
+  return values.map((value) => {
+    const key = JSON.stringify(value);
+    return Object.freeze({ ...value, current: () => {
+      try {
+        const now = read();
+        if (!current() || !Array.isArray(now) || now.length > 256) return false;
+        const matches = now.filter((marker) => {
+          var _a;
+          return ((_a = marker == null ? void 0 : marker.id) == null ? void 0 : _a.toLowerCase()) === value.id;
+        });
+        return matches.length === 1 && JSON.stringify(snapshot(matches[0])) === key;
+      } catch (e) {
+        return false;
+      }
+    } });
+  });
+}
+
 // src/collaboration/CollaborationBridge.ts
 var validOffset = (offset) => offset && [offset.x, offset.y].every((value) => Number.isFinite(value) && value >= 0 && value <= 1);
 var TimelineSurface = class {
   constructor(port) {
     this.port = port;
     this.protocolVersion = 1;
-    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal", "annotation", "groups", "ranges", "range-presence"]);
+    this.capabilities = Object.freeze(["item", "cell", "selection", "geometry", "reveal", "annotation", "groups", "ranges", "range-presence", "local-markers"]);
     this.listeners = /* @__PURE__ */ new Set();
     this.closed = false;
     this.serial = 0;
@@ -1622,6 +1686,12 @@ var TimelineSurface = class {
       var _a, _b;
       return this.current() ? (_b = (_a = this.port).ranges) == null ? void 0 : _b.call(_a) : void 0;
     }) : void 0;
+  }
+  localMarkers() {
+    return localMarkerSnapshots(() => {
+      var _a, _b, _c;
+      return (_c = (_b = (_a = this.port).localMarkers) == null ? void 0 : _b.call(_a)) != null ? _c : [];
+    }, () => this.current());
   }
   /** Passive capture. No annotation gesture, task read, selection or saved write. */
   rangePresence(point) {
@@ -5815,6 +5885,7 @@ var SabidurianView = class extends import_obsidian8.BasesView {
       },
       reveal: (target) => this.revealDiscussionTarget(target),
       ranges: () => this.rangeState(),
+      localMarkers: () => this.plugin.settings.markers,
       focusRange: (range, axis) => this.focusDiscussionRange(range, axis),
       rangeScrolled: () => this.finishRangeNavigation()
     });
@@ -8784,6 +8855,7 @@ var MarkerModal = class extends import_obsidian10.Modal {
     this.plugin = plugin;
     this.marker = marker;
     this.index = index;
+    this.original = JSON.stringify(marker);
     if (marker) {
       this.label = marker.label;
       this.color = marker.color;
@@ -8824,8 +8896,9 @@ var MarkerModal = class extends import_obsidian10.Modal {
     });
     new import_obsidian10.Setting(contentEl).addButton(
       (btn) => btn.setButtonText("Save").setCta().onClick(async () => {
-        var _a;
+        var _a, _b, _c;
         const newMarker = {
+          id: (_b = (_a = this.marker) == null ? void 0 : _a.id) != null ? _b : crypto.randomUUID(),
           label: this.label || "Untitled",
           color: this.color,
           enabled: true
@@ -8837,13 +8910,18 @@ var MarkerModal = class extends import_obsidian10.Modal {
           newMarker.end = this.end;
         }
         if (this.marker && this.index >= 0) {
-          this.plugin.settings.markers[this.index] = newMarker;
+          const matches = this.plugin.settings.markers.filter((value) => value.id === this.marker.id);
+          if (!this.marker.id || matches.length !== 1 || JSON.stringify(matches[0]) !== this.original) {
+            new import_obsidian10.Notice("This marker changed. Reopen it before saving.");
+            return;
+          }
+          this.plugin.settings.markers[this.plugin.settings.markers.indexOf(matches[0])] = newMarker;
         } else {
           this.plugin.settings.markers.push(newMarker);
         }
         await this.plugin.saveSettings();
         this.close();
-        const settingTab = (_a = this.plugin.app.setting) == null ? void 0 : _a.activeTab;
+        const settingTab = (_c = this.plugin.app.setting) == null ? void 0 : _c.activeTab;
         if (settingTab instanceof SabidurianSettingTab) {
           settingTab.display();
         }
@@ -9041,6 +9119,7 @@ var SabidurianPlugin = class extends import_obsidian11.Plugin {
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.settings.propertyColors = normalizePropertyColors(this.settings.propertyColors);
+    if (Array.isArray(this.settings.markers) && identifyLocalMarkers(this.settings.markers)) await this.saveData(this.settings);
   }
   async saveSettings() {
     await this.saveData(this.settings);

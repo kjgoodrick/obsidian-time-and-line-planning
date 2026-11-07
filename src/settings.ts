@@ -6,10 +6,12 @@
  * F5: markers array + MarkerModal
  */
 
-import { App, Modal, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import { COLOR_TONES, type PropertyColors } from './utils/colorUtils';
 
 export interface SabidurianMarker {
+  /** Device-local origin identity; never a shared discussion identity. */
+  id?: string;
   label: string;
   /** Single date → vertical line. */
   date?: string;
@@ -237,6 +239,7 @@ class MarkerModal extends Modal {
   private plugin: Plugin & { settings: SabidurianSettings; saveSettings: () => Promise<void> };
   private marker: SabidurianMarker | null;
   private index: number;
+  private original: string;
 
   private label = '';
   private markerType: 'line' | 'band' = 'line';
@@ -255,6 +258,7 @@ class MarkerModal extends Modal {
     this.plugin = plugin;
     this.marker = marker;
     this.index = index;
+    this.original = JSON.stringify(marker);
 
     if (marker) {
       this.label = marker.label;
@@ -317,6 +321,7 @@ class MarkerModal extends Modal {
         .setCta()
         .onClick(async () => {
           const newMarker: SabidurianMarker = {
+            id: this.marker?.id ?? crypto.randomUUID(),
             label: this.label || 'Untitled',
             color: this.color,
             enabled: true,
@@ -330,7 +335,11 @@ class MarkerModal extends Modal {
           }
 
           if (this.marker && this.index >= 0) {
-            this.plugin.settings.markers[this.index] = newMarker;
+            const matches = this.plugin.settings.markers.filter(value => value.id === this.marker!.id);
+            if (!this.marker.id || matches.length !== 1 || JSON.stringify(matches[0]) !== this.original) {
+              new Notice('This marker changed. Reopen it before saving.'); return;
+            }
+            this.plugin.settings.markers[this.plugin.settings.markers.indexOf(matches[0])] = newMarker;
           } else {
             this.plugin.settings.markers.push(newMarker);
           }

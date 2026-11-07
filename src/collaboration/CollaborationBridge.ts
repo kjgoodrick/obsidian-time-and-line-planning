@@ -5,6 +5,8 @@ import { beginRangeInteraction } from './RangeInteraction';
 import type { HistoricalPoint, TimelineRange } from './TimelineRange';
 import { annotationPicker } from './AnnotationPicker';
 import { presenceRange } from './RangePresence';
+import { localMarkerSnapshots, type LocalMarkerSnapshot } from './LocalMarkers';
+import type { SabidurianMarker } from '../settings';
 
 declare module 'obsidian' {
   interface Workspace {
@@ -51,6 +53,7 @@ export interface TimelineSurfacePort {
   /** Rebuild a temporary local axis; never modify saved view or task data. */
   focusRange?(range: TimelineRange, axis: RangeAxis): boolean;
   rangeScrolled?(): void;
+  localMarkers?(): readonly SabidurianMarker[];
 }
 
 export interface TimelineRangeGeometry {
@@ -64,7 +67,7 @@ export interface TimelineRangePresence {
 /** One lifetime per Bases view, retained across renderer replacement. */
 export class TimelineSurface {
   readonly protocolVersion = 1;
-  readonly capabilities = Object.freeze(['item', 'cell', 'selection', 'geometry', 'reveal', 'annotation', 'groups', 'ranges', 'range-presence'] as const);
+  readonly capabilities = Object.freeze(['item', 'cell', 'selection', 'geometry', 'reveal', 'annotation', 'groups', 'ranges', 'range-presence', 'local-markers'] as const);
   private listeners = new Set<() => void>();
   private closed = false;
   private serial = 0;
@@ -118,6 +121,9 @@ export class TimelineSurface {
   }
   reveal(target: TimelineTarget): TimelineReveal { return this.viewport() && this.port.targetsCurrent?.() !== false && (target?.type === 'item' || target?.type === 'cell') ? this.port.reveal(target) : 'unavailable'; }
   rangeContext(): RangeContext | undefined { return this.current() ? rangeContext(() => this.current() ? this.port.ranges?.() : undefined) : undefined; }
+  localMarkers(): LocalMarkerSnapshot[] {
+    return localMarkerSnapshots(() => this.port.localMarkers?.() ?? [], () => this.current());
+  }
   /** Passive capture. No annotation gesture, task read, selection or saved write. */
   rangePresence(point?: TimelinePoint): TimelineRangePresence | undefined {
     try {

@@ -8,6 +8,7 @@ import { SabidurianSettingTab, DEFAULT_SETTINGS, type SabidurianSettings } from 
 import { NativeTableColors } from './renderer/NativeTableColors';
 import { getPropertyTone, normalizePropertyColors } from './utils/colorUtils';
 import { CollaborationBridge } from './collaboration/CollaborationBridge';
+import { identifyLocalMarkers } from './collaboration/LocalMarkers';
 
 const SABIDURIAN_VIEW_TYPE = 'sabidurian-timeline';
 const SEQUENCE_VIEW_TYPE = 'sabidurian-sequence';
@@ -70,6 +71,7 @@ export default class SabidurianPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.settings.propertyColors = normalizePropertyColors(this.settings.propertyColors);
+    if (Array.isArray(this.settings.markers) && identifyLocalMarkers(this.settings.markers)) await this.saveData(this.settings);
   }
 
   async saveSettings(): Promise<void> {

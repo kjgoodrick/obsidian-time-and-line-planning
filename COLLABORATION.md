@@ -9,6 +9,35 @@ timeline comment feature: complete marker workflows and native
 desktop/mobile acceptance remain. Lane headers now expose exact query group
 objects; the consumer derives typed targets with its existing authorization.
 
+## Local marker origin snapshots
+
+The optional `local-markers` capability adds read-only `localMarkers()` snapshots
+to calendar Timeline surfaces. Sequence returns an empty list. The list is
+bounded to 256 and preserves raw label/date/range/color/enabled values. Snapshots
+become stale after source edits, deletion, duplicate identities or provider
+closure; array reordering is harmless. This API cannot edit plugin settings,
+grant collaboration access or turn a local marker into a shared target itself.
+
+Legacy settings receive persistent random `id` fields during load, saved before
+the bridge becomes available. Existing unique IDs survive; invalid/duplicate IDs
+are repaired without changing marker values. New markers get IDs and edits
+preserve them. A stale edit cannot overwrite a different item after reordering.
+These are local origin IDs, not shared discussion IDs. Older builds may drop the
+field during edits; their consumers must explicitly match after upgrading.
+
+Team Relay's preview consumer supports reviewed shared-copy preparation and
+explicit local-to-shared matching. Shared IDs are namespaced by base definition,
+generation and local origin; the server's revision check prevents a second
+promotion. Matching is a local account-bound association, not settings sync.
+Consumers must still check source lifetime, saved-view identity and permissions.
+The native November 7 disposable-vault test verifies promotion, duplicate-copy
+refusal, matching, keyboard confirmation and persistence after full reload.
+No shared metadata, comment or `.base` content is written by the provider bridge.
+
+All 257 provider tests, typecheck and package build pass. The companion source
+interoperability run covers both plugin load orders and grouped/ungrouped views.
+Native mobile/popout, settings-edit races and full timeline acceptance remain.
+
 ## Discovery and lifetime
 
 Listen for the workspace event `time-and-line:collaboration-ready`. A consumer

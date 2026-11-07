@@ -8,6 +8,8 @@ import { TaskInspector } from '../src/interaction/TaskInspector';
 import { Modal } from './obsidian-mock';
 import { parseTimelineRange } from '../src/collaboration/TimelineRange';
 import { projectRange } from '../src/collaboration/RangeProjection';
+import { identifyLocalMarkers, localMarkerSnapshots } from '../src/collaboration/LocalMarkers';
+import type { SabidurianMarker } from '../src/settings';
 
 const win = new Window();
 Object.assign(globalThis, { window: win, document: win.document, MouseEvent: win.MouseEvent, CSS: win.CSS });
@@ -30,6 +32,30 @@ const frames = new Map<number, FrameRequestCallback>(); let serial = 0;
 globalThis.requestAnimationFrame = callback => { frames.set(++serial, callback); return serial; };
 globalThis.cancelAnimationFrame = id => { frames.delete(id); };
 const views: (SabidurianView | SequenceView)[] = [];
+test('local marker identities survive reorder and repair duplicate legacy IDs without changing metadata', () => {
+  const first = '73000000-0000-4000-8000-000000000001'; let serial = 1;
+  const markers: SabidurianMarker[] = [{ id: first, label: 'First', color: '#112233', date: '2026-11-07', enabled: true },
+    { id: first, label: 'Second', color: 'var(--color-blue)', start: '-500', end: '0', enabled: false },
+    { label: 'Third', color: '#ffffff', date: '2027', enabled: true }];
+  const original = markers.map(({ id, ...value }) => value);
+  assert.equal(identifyLocalMarkers(markers, () => `73000000-0000-4000-8000-${String(++serial).padStart(12, '0')}`), true);
+  assert.equal(new Set(markers.map(marker => marker.id)).size, 3);
+  assert.deepEqual(markers.map(({ id, ...value }) => value), original);
+  markers.reverse(); assert.equal(identifyLocalMarkers(markers), false);
+});
+test('local snapshots fence edits, deletion, duplication and unload while allowing reorder', () => {
+  const markers: SabidurianMarker[] = [1, 2].map(value => ({ id: `73000000-0000-4000-8000-${String(value).padStart(12, '0')}`,
+    label: 'Same label', color: '#112233', date: '2026-11-07', enabled: true }));
+  let active = true;
+  const snapshots = localMarkerSnapshots(() => markers, () => active);
+  markers.reverse(); assert.equal(snapshots[0].current(), true);
+  markers[1].label = 'Changed'; assert.equal(snapshots[0].current(), false);
+  assert.equal(snapshots[1].current(), true); markers.push({ ...markers[0] });
+  assert.equal(snapshots[1].current(), false); assert.throws(() => localMarkerSnapshots(() => markers, () => active));
+  markers.pop(); markers.pop(); assert.equal(snapshots[0].current(), false);
+  active = false; assert.equal(snapshots[1].current(), false);
+  assert.throws(() => localMarkerSnapshots(() => Array(257).fill(markers[0]), () => true));
+});
 afterEach(() => {
   for (const view of views.splice(0)) view.onunload();
   for (const modal of Modal.opened) modal.close(); Modal.opened = [];

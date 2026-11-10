@@ -1,7 +1,7 @@
 {
   "id": "timeline-gantt-view",
   "name": "Time & Line (Planning)",
-  "version": "1.0.0-thanksgiving.11",
+  "version": "1.0.0-thanksgiving.12",
   "minAppVersion": "1.10.0",
   "description": "Local planning fork of Time & Line with precise dates, full labels and touch-friendly editing.",
   "author": "Sabidurian",

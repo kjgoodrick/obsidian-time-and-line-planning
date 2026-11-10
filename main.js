@@ -93,7 +93,349 @@ var EditHistory = class {
 };
 
 // src/main.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian12 = require("obsidian");
+
+// src/updates/releases.ts
+var RELEASE_REPOSITORY = "kjgoodrick/obsidian-time-and-line-planning";
+var RELEASES_URL = `https://api.github.com/repos/${RELEASE_REPOSITORY}/releases?per_page=100`;
+var PLUGIN_ID = "timeline-gantt-view";
+var RUNTIME_FILES = ["main.js", "styles.css", "manifest.json"];
+var LIMITS = { "main.js": 2e7, "styles.css": 2e6, "manifest.json": 16384, SHA256SUMS: 16384 };
+function versionParts(value) {
+  if (typeof value !== "string" || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value)) return;
+  const parts = value.split(".").map(Number);
+  return parts.every(Number.isSafeInteger) ? parts : void 0;
+}
+function compareVersions(a, b) {
+  const x = versionParts(a), y = versionParts(b);
+  if (!x || !y) throw new Error("Cannot compare an invalid release version.");
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i] ? 1 : -1;
+  return 0;
+}
+function assetUrl(version, file) {
+  if (!versionParts(version) || !Object.prototype.hasOwnProperty.call(LIMITS, file)) throw new Error("Invalid release asset.");
+  return `https://github.com/${RELEASE_REPOSITORY}/releases/download/${version}/${file}`;
+}
+function selectRelease(value, current) {
+  if (!Array.isArray(value)) throw new Error("GitHub returned an invalid release list.");
+  return value.flatMap((r) => {
+    if (!r || r.draft !== false || !versionParts(r.tag_name) || !r.published_at || !Array.isArray(r.assets) || compareVersions(r.tag_name, current) <= 0) return [];
+    const sizes = {};
+    for (const file of Object.keys(LIMITS)) {
+      const matches = r.assets.filter((a2) => (a2 == null ? void 0 : a2.name) === file);
+      if (matches.length !== 1) return [];
+      const a = matches[0];
+      if (a.state !== "uploaded" || a.browser_download_url !== assetUrl(r.tag_name, file) || !Number.isSafeInteger(a.size) || a.size <= 0 || a.size > LIMITS[file]) return [];
+      sizes[file] = a.size;
+    }
+    return [{ version: r.tag_name, url: `https://github.com/${RELEASE_REPOSITORY}/releases/tag/${r.tag_name}`, prerelease: r.prerelease === true, sizes }];
+  }).sort((a, b) => compareVersions(b.version, a.version))[0];
+}
+function decode(bytes) {
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
+async function sha256(bytes) {
+  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function parseChecksums(text) {
+  const hashes = {};
+  for (const line of text.trim().split(/\r?\n/)) {
+    const match = /^([a-fA-F0-9]{64}) [ *]([^\s/\\]+)$/.exec(line);
+    if (!match) throw new Error("The release checksum file is invalid.");
+    if (!RUNTIME_FILES.includes(match[2])) continue;
+    const name = match[2];
+    if (hashes[name]) throw new Error("The release contains duplicate checksums.");
+    hashes[name] = match[1].toLowerCase();
+  }
+  if (!RUNTIME_FILES.every((f) => hashes[f])) throw new Error("The release is missing checksums.");
+  return hashes;
+}
+function validateManifest(bytes, version, supportsApi, mobile) {
+  const manifest = JSON.parse(decode(bytes));
+  if (manifest.id !== PLUGIN_ID || manifest.version !== version || !versionParts(manifest.minAppVersion) || typeof manifest.name !== "string") throw new Error("The downloaded manifest does not match this plugin release.");
+  if (!supportsApi(manifest.minAppVersion)) throw new Error(`This release requires Obsidian ${manifest.minAppVersion} or newer.`);
+  if (mobile && manifest.isDesktopOnly !== false) throw new Error("This release does not declare mobile support.");
+}
+async function downloadAsset(request, release, file) {
+  const response = await request(assetUrl(release.version, file));
+  if (response.status !== 200) throw new Error(`GitHub download failed (HTTP ${response.status}). Try again later.`);
+  if (response.arrayBuffer.byteLength !== release.sizes[file] || response.arrayBuffer.byteLength > LIMITS[file]) throw new Error(`The downloaded ${file} has an unexpected size.`);
+  return response.arrayBuffer;
+}
+async function downloadBundle(request, release, supportsApi, mobile) {
+  const hashes = parseChecksums(decode(await downloadAsset(request, release, "SHA256SUMS")));
+  const bundle = {};
+  for (const file of RUNTIME_FILES) {
+    bundle[file] = await downloadAsset(request, release, file);
+    if (await sha256(bundle[file]) !== hashes[file]) throw new Error(`Checksum verification failed for ${file}. Nothing was installed.`);
+  }
+  validateManifest(bundle["manifest.json"], release.version, supportsApi, mobile);
+  return bundle;
+}
+
+// src/updates/PluginUpdater.ts
+var PluginUpdater = class {
+  constructor(files, currentVersion, request, supportsApi, mobile, notify = () => {
+  }, now = Date.now) {
+    this.files = files;
+    this.currentVersion = currentVersion;
+    this.request = request;
+    this.supportsApi = supportsApi;
+    this.mobile = mobile;
+    this.notify = notify;
+    this.now = now;
+    this.checks = { automatic: true, lastAttempt: 0, lastSuccess: 0 };
+    this.listeners = /* @__PURE__ */ new Set();
+    this.disposed = false;
+    this.ready = false;
+    this.subscribe = (listener) => {
+      this.listeners.add(listener);
+      listener(this.state);
+      return () => this.listeners.delete(listener);
+    };
+    this.state = { currentVersion, automatic: true, busy: false, message: "Checks this fork\u2019s GitHub releases, including previews." };
+  }
+  snapshot() {
+    return this.state;
+  }
+  set(patch) {
+    this.state = { ...this.state, ...patch };
+    if (!this.disposed) for (const listener of this.listeners) listener(this.state);
+  }
+  /** Returns false when recovery changed disk files: the host must restart before sync starts. */
+  async initialize() {
+    try {
+      if (!versionParts(this.currentVersion)) {
+        this.set({ error: "Updates require a versioned preview build." });
+        return true;
+      }
+      const recovery = await this.files.recover();
+      if (recovery.restored) {
+        this.set({ error: "An interrupted update was restored. Restart Obsidian before using Time & Line." });
+        this.notify(this.state.error);
+        return false;
+      }
+      if (recovery.installedVersion && recovery.installedVersion !== this.currentVersion) this.set({ installedVersion: recovery.installedVersion, message: "Update installed. Restart Obsidian to load it." });
+      try {
+        const saved = await this.files.readState();
+        if (saved) {
+          this.checks = { automatic: saved.automatic !== false, lastAttempt: Number.isFinite(saved.lastAttempt) ? saved.lastAttempt : 0, lastSuccess: Number.isFinite(saved.lastSuccess) ? saved.lastSuccess : 0 };
+          const cached = saved.available;
+          if (cached && versionParts(cached.version) && cached.sizes) {
+            this.checks.available = selectRelease([{ tag_name: cached.version, draft: false, published_at: "cached", prerelease: cached.prerelease, assets: ["main.js", "manifest.json", "styles.css", "SHA256SUMS"].map((name) => ({ name, size: cached.sizes[name], state: "uploaded", browser_download_url: assetUrl(cached.version, name) })) }], this.currentVersion);
+            if (this.checks.available && !this.state.installedVersion) this.set({ release: this.checks.available, message: `Version ${this.checks.available.version} is available (last checked previously).` });
+          }
+        }
+      } catch (e) {
+      }
+      this.ready = true;
+      this.set({ automatic: this.checks.automatic });
+      return true;
+    } catch (error) {
+      this.set({ error: `Updater unavailable: ${this.errorMessage(error)}` });
+      this.notify(this.state.error);
+      return false;
+    }
+  }
+  start() {
+    if (this.timer || this.disposed || !this.ready) return;
+    this.startupTimer = setTimeout(() => {
+      void this.check(false);
+    }, 3e4);
+    this.timer = setInterval(() => {
+      void this.check(false);
+    }, 60 * 6e4);
+  }
+  async setAutomatic(automatic) {
+    if (this.disposed || this.state.busy) return;
+    const previous = this.checks.automatic;
+    this.checks.automatic = automatic;
+    try {
+      await this.files.writeState(this.checks);
+      this.set({ automatic, error: void 0 });
+    } catch (e) {
+      this.checks.automatic = previous;
+      this.set({ error: "Could not save the update preference." });
+    }
+  }
+  async check(manual = true) {
+    if (!this.ready || this.disposed || this.state.busy || this.state.installedVersion) return;
+    const now = this.now();
+    if (!manual && (!this.checks.automatic || now >= this.checks.lastAttempt && now - this.checks.lastAttempt < 60 * 6e4 || now >= this.checks.lastSuccess && now - this.checks.lastSuccess < 24 * 60 * 6e4)) return;
+    this.set({ busy: true, error: void 0, message: "Checking GitHub\u2026" });
+    this.checks.lastAttempt = now;
+    try {
+      await this.files.writeState(this.checks);
+      const response = await this.timedRequest(RELEASES_URL);
+      if (response.status === 403 || response.status === 429) throw new Error("GitHub is limiting update checks. Try again later.");
+      if (response.status !== 200) throw new Error(`GitHub check failed (HTTP ${response.status}). Try again later.`);
+      if (response.arrayBuffer.byteLength > 4e6) throw new Error("GitHub returned an oversized release list.");
+      const release = selectRelease(JSON.parse(decode(response.arrayBuffer)), this.currentVersion);
+      if (this.disposed) return;
+      this.checks.lastSuccess = now;
+      this.checks.available = release;
+      await this.files.writeState(this.checks);
+      this.set({ release, message: release ? `Version ${release.version} is available${release.prerelease ? " (preview)" : ""}.` : "You\u2019re up to date." });
+      if (!manual && release && this.announced !== release.version) {
+        this.announced = release.version;
+        this.notify(`Time & Line ${release.version} is available. Open plugin settings to update.`);
+      }
+    } catch (error) {
+      if (!this.disposed) this.set({ error: this.errorMessage(error), message: "Update check did not finish." });
+    } finally {
+      this.set({ busy: false });
+    }
+  }
+  async timedRequest(url) {
+    if (this.disposed) throw new Error("The plugin was unloaded.");
+    let timer;
+    try {
+      const result = await Promise.race([
+        this.request(url),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("GitHub did not respond in time. Try again later.")), 3e4);
+        })
+      ]);
+      if (this.disposed) throw new Error("The plugin was unloaded.");
+      return result;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  async install() {
+    const release = this.state.release;
+    if (!this.ready || this.disposed || this.state.busy || !release || this.state.installedVersion) return;
+    this.set({ busy: true, error: void 0, message: `Downloading and verifying ${release.version}\u2026` });
+    try {
+      const bundle = await downloadBundle((url) => this.timedRequest(url), release, this.supportsApi, this.mobile);
+      if (this.disposed) return;
+      this.set({ message: "Installing verified files. Keep Obsidian open\u2026" });
+      await this.files.install(bundle, this.currentVersion, release.version);
+      this.set({ installedVersion: release.version, message: `Installed ${release.version}. Save your edits and restart Obsidian to load the update.` });
+      if (!this.disposed) this.notify(this.state.message);
+    } catch (error) {
+      if (!this.disposed) this.set({ error: this.errorMessage(error), message: "Update was not installed." });
+    } finally {
+      this.set({ busy: false });
+    }
+  }
+  errorMessage(error) {
+    return error instanceof Error ? error.message : "The update could not be completed.";
+  }
+  dispose() {
+    this.disposed = true;
+    clearInterval(this.timer);
+    clearTimeout(this.startupTimer);
+    this.listeners.clear();
+  }
+};
+
+// src/updates/UpdateFiles.ts
+var encode = (value) => new TextEncoder().encode(JSON.stringify(value)).buffer;
+var UpdateFiles = class {
+  constructor(storage, pluginDir) {
+    this.storage = storage;
+    this.pluginDir = pluginDir;
+    if (!pluginDir || pluginDir.startsWith("/") || pluginDir.split("/").some((p) => !p || p === "." || p === "..") || pluginDir.includes("\\")) throw new Error("Invalid plugin installation directory.");
+    this.directory = `${pluginDir}/.timeline-update`;
+  }
+  path(file) {
+    return `${this.directory}/${file}`;
+  }
+  async ensureDirectory() {
+    if (!await this.storage.exists(this.directory)) await this.storage.mkdir(this.directory);
+  }
+  async writeState(value) {
+    await this.ensureDirectory();
+    await this.writeVerified(this.path("checks.json"), encode(value));
+  }
+  async readState() {
+    if (!await this.storage.exists(this.path("checks.json"))) return void 0;
+    return JSON.parse(new TextDecoder().decode(await this.storage.readBinary(this.path("checks.json"))));
+  }
+  async writeVerified(path, bytes) {
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    if (await this.storage.exists(path)) await this.storage.process(path, () => text);
+    else await this.storage.writeBinary(path, bytes);
+    if (await sha256(await this.storage.readBinary(path)) !== await sha256(bytes)) throw new Error("Update file verification failed.");
+  }
+  async journal(value) {
+    await this.writeVerified(this.path("journal.json"), encode(value));
+  }
+  async matches(hashes) {
+    for (const file of RUNTIME_FILES) {
+      if (!await this.storage.exists(`${this.pluginDir}/${file}`) || await sha256(await this.storage.readBinary(`${this.pluginDir}/${file}`)) !== hashes[file]) return false;
+    }
+    return true;
+  }
+  async restore(j) {
+    const backup = {};
+    for (const f of RUNTIME_FILES) {
+      backup[f] = await this.storage.readBinary(this.path(`${f}.previous`));
+      if (await sha256(backup[f]) !== j.before[f]) throw new Error("The update backup is damaged. Keep .timeline-update and reinstall the previous release manually.");
+    }
+    for (const f of RUNTIME_FILES) await this.writeVerified(`${this.pluginDir}/${f}`, backup[f]);
+    if (!await this.matches(j.before)) throw new Error("Could not verify the restored plugin files.");
+    await this.journal({ ...j, state: "restored" });
+  }
+  async recover() {
+    if (!await this.storage.exists(this.path("journal.json"))) return {};
+    const bytes = await this.storage.readBinary(this.path("journal.json"));
+    if (bytes.byteLength > 16384) throw new Error("Invalid update journal. Reinstall the plugin runtime files manually.");
+    const j = JSON.parse(new TextDecoder().decode(bytes));
+    if (j.format !== 1 || !["prepared", "installed", "restored", "superseded"].includes(j.state) || !versionParts(j.from) || !versionParts(j.to) || !RUNTIME_FILES.every((f) => {
+      var _a, _b;
+      return /^[a-f0-9]{64}$/.test((_a = j.before) == null ? void 0 : _a[f]) && /^[a-f0-9]{64}$/.test((_b = j.after) == null ? void 0 : _b[f]);
+    })) throw new Error("Invalid update journal. Keep .timeline-update for recovery.");
+    if (j.state === "superseded") return {};
+    if (j.state === "restored" && await this.matches(j.before)) return {};
+    if (j.state === "installed" && await this.matches(j.after)) return { installedVersion: j.to };
+    if (j.state !== "prepared") {
+      let superseded = false;
+      try {
+        const manifest = JSON.parse(new TextDecoder().decode(await this.storage.readBinary(`${this.pluginDir}/manifest.json`)));
+        const completedVersion = j.state === "installed" ? j.to : j.from;
+        superseded = manifest.id === "timeline-gantt-view" && !!versionParts(manifest.version) && manifest.version !== completedVersion;
+      } catch (e) {
+      }
+      if (superseded) {
+        await this.journal({ ...j, state: "superseded" });
+        return {};
+      }
+    }
+    await this.restore(j);
+    return { restored: true };
+  }
+  async install(bundle, from, to) {
+    await this.ensureDirectory();
+    const recovery = await this.recover();
+    if (recovery.restored) throw new Error("An interrupted update was restored. Restart Obsidian before trying again.");
+    const existing = JSON.parse(new TextDecoder().decode(await this.storage.readBinary(`${this.pluginDir}/manifest.json`)));
+    if (existing.id !== "timeline-gantt-view" || existing.version !== from) throw new Error("Plugin files changed since startup. Restart Obsidian before updating.");
+    const before = {}, after = {};
+    for (const f of RUNTIME_FILES) {
+      const previous = await this.storage.readBinary(`${this.pluginDir}/${f}`);
+      before[f] = await sha256(previous);
+      after[f] = await sha256(bundle[f]);
+      await this.writeVerified(this.path(`${f}.previous`), previous);
+      await this.writeVerified(this.path(`${f}.next`), bundle[f]);
+    }
+    const j = { format: 1, state: "prepared", from, to, before, after };
+    await this.journal(j);
+    try {
+      for (const f of RUNTIME_FILES) await this.writeVerified(`${this.pluginDir}/${f}`, await this.storage.readBinary(this.path(`${f}.next`)));
+      if (!await this.matches(after)) throw new Error("Installed files failed verification.");
+      await this.journal({ ...j, state: "installed" });
+    } catch (e) {
+      try {
+        await this.restore(j);
+      } catch (e2) {
+        throw new Error("Update interrupted and automatic restoration failed. Keep .timeline-update and reinstall the previous release before restarting Obsidian.");
+      }
+      throw new Error("Update failed. The previous plugin files were restored; your running session was kept.");
+    }
+  }
+};
 
 // src/utils/timezone.ts
 function utcMs(year, month = 0, day = 1, hour = 0, minute = 0, second = 0) {
@@ -8714,8 +9056,23 @@ function getSequenceViewOptions(config) {
   ];
 }
 
-// src/settings.ts
+// src/updates/UpdateSettings.ts
 var import_obsidian10 = require("obsidian");
+function renderPluginUpdates(updates, updater) {
+  return updater.subscribe((state) => {
+    updates.empty();
+    updates.createEl("h3", { text: "Plugin updates" });
+    new import_obsidian10.Setting(updates).setName("Automatic update checks").setDesc("Check this planning fork\u2019s GitHub releases daily. Installation is always your choice.").addToggle((toggle) => toggle.setValue(state.automatic).setDisabled(state.busy).onChange((value) => updater.setAutomatic(value)));
+    new import_obsidian10.Setting(updates).setName(`Installed version: ${state.currentVersion}`).setDesc(state.error || state.message).addButton((button) => button.setButtonText("Check for updates").setDisabled(state.busy || !!state.installedVersion).onClick(() => updater.check()));
+    if (state.release && !state.installedVersion) {
+      new import_obsidian10.Setting(updates).setName(`Version ${state.release.version}${state.release.prerelease ? " (preview)" : ""}`).setDesc("Verifies downloads and preserves your settings. Restart Obsidian after installation.").addButton((button) => button.setButtonText(`Update to ${state.release.version}`).setCta().setDisabled(state.busy).onClick(() => updater.install()));
+      updates.createEl("a", { text: "Release notes", href: state.release.url });
+    }
+  });
+}
+
+// src/settings.ts
+var import_obsidian11 = require("obsidian");
 var DEFAULT_SETTINGS = {
   propertyColors: {},
   weekStart: 1,
@@ -8738,28 +9095,41 @@ var MARKER_COLORS = {
   "Accent": "var(--interactive-accent)",
   "Muted": "var(--text-muted)"
 };
-var SabidurianSettingTab = class extends import_obsidian10.PluginSettingTab {
+var SabidurianSettingTab = class extends import_obsidian11.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
+  hide() {
+    var _a;
+    (_a = this.unsubscribeUpdates) == null ? void 0 : _a.call(this);
+    this.unsubscribeUpdates = void 0;
+  }
   display() {
+    var _a;
+    (_a = this.unsubscribeUpdates) == null ? void 0 : _a.call(this);
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Time & Line" });
-    new import_obsidian10.Setting(containerEl).setName("Week starts on").setDesc("Which day of the week is treated as the first day.").addDropdown((dropdown) => {
+    const updater = this.plugin.updater;
+    if (updater) {
+      const updates = containerEl.createDiv();
+      this.unsubscribeUpdates = renderPluginUpdates(updates, updater);
+    }
+    if (this.plugin.updaterBlockedStartup) return;
+    new import_obsidian11.Setting(containerEl).setName("Week starts on").setDesc("Which day of the week is treated as the first day.").addDropdown((dropdown) => {
       dropdown.addOption("0", "Sunday").addOption("1", "Monday").setValue(String(this.plugin.settings.weekStart)).onChange(async (value) => {
         this.plugin.settings.weekStart = parseInt(value, 10);
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian10.Setting(containerEl).setName("Default dependency property").setDesc("Frontmatter property name used to declare dependencies (e.g. blocked-by).").addText((text) => {
+    new import_obsidian11.Setting(containerEl).setName("Default dependency property").setDesc("Frontmatter property name used to declare dependencies (e.g. blocked-by).").addText((text) => {
       text.setPlaceholder("blocked-by").setValue(this.plugin.settings.dependencyProperty).onChange(async (value) => {
         this.plugin.settings.dependencyProperty = value.trim() || "blocked-by";
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian10.Setting(containerEl).setName("Max entries before warning").setDesc("Show a performance warning when a Base exceeds this number of entries.").addText((text) => {
+    new import_obsidian11.Setting(containerEl).setName("Max entries before warning").setDesc("Show a performance warning when a Base exceeds this number of entries.").addText((text) => {
       text.setPlaceholder("5000").setValue(String(this.plugin.settings.maxEntries)).onChange(async (value) => {
         const num = parseInt(value, 10);
         if (!isNaN(num) && num > 0) {
@@ -8768,7 +9138,7 @@ var SabidurianSettingTab = class extends import_obsidian10.PluginSettingTab {
         }
       });
     });
-    new import_obsidian10.Setting(containerEl).setName("Show property badges on bars").setDesc("Display configured bar properties as compact badges. Properties are selected per-view in the Bases Configure panel.").addToggle((toggle) => {
+    new import_obsidian11.Setting(containerEl).setName("Show property badges on bars").setDesc("Display configured bar properties as compact badges. Properties are selected per-view in the Bases Configure panel.").addToggle((toggle) => {
       toggle.setValue(this.plugin.settings.showBarProperties).onChange(async (value) => {
         this.plugin.settings.showBarProperties = value;
         await this.plugin.saveSettings();
@@ -8778,7 +9148,7 @@ var SabidurianSettingTab = class extends import_obsidian10.PluginSettingTab {
     containerEl.createEl("p", { text: "Use the same muted color for a value in timeline bars, badges and editable Bases tables." });
     for (const [property2, values] of Object.entries(this.plugin.settings.propertyColors)) {
       for (const [value, tone] of Object.entries(values)) {
-        new import_obsidian10.Setting(containerEl).setName(value).setDesc(property2).addDropdown((dropdown) => {
+        new import_obsidian11.Setting(containerEl).setName(value).setDesc(property2).addDropdown((dropdown) => {
           for (const color of COLOR_TONES) dropdown.addOption(color, color[0].toUpperCase() + color.slice(1));
           dropdown.setValue(tone).onChange(async (color) => {
             values[value] = color;
@@ -8792,7 +9162,7 @@ var SabidurianSettingTab = class extends import_obsidian10.PluginSettingTab {
       }
     }
     let newProperty = "", newValue = "";
-    new import_obsidian10.Setting(containerEl).setName("Add a value color").addText((text) => text.setPlaceholder("Property, e.g. Dish").onChange((value) => {
+    new import_obsidian11.Setting(containerEl).setName("Add a value color").addText((text) => text.setPlaceholder("Property, e.g. Dish").onChange((value) => {
       newProperty = value.trim();
     })).addText((text) => text.setPlaceholder("Exact property value").onChange((value) => {
       newValue = value.trim();
@@ -8804,24 +9174,24 @@ var SabidurianSettingTab = class extends import_obsidian10.PluginSettingTab {
       await this.plugin.saveSettings();
       this.display();
     }));
-    new import_obsidian10.Setting(containerEl).setName("Lock on mobile").setDesc("Automatically lock the timeline on touch/mobile devices to prevent accidental edits.").addToggle((toggle) => {
+    new import_obsidian11.Setting(containerEl).setName("Lock on mobile").setDesc("Automatically lock the timeline on touch/mobile devices to prevent accidental edits.").addToggle((toggle) => {
       toggle.setValue(this.plugin.settings.lockOnMobile).onChange(async (value) => {
         this.plugin.settings.lockOnMobile = value;
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian10.Setting(containerEl).setName("Locked property name").setDesc("Frontmatter property used to lock individual notes from drag/resize (e.g. locked).").addText((text) => {
+    new import_obsidian11.Setting(containerEl).setName("Locked property name").setDesc("Frontmatter property used to lock individual notes from drag/resize (e.g. locked).").addText((text) => {
       text.setPlaceholder("locked").setValue(this.plugin.settings.lockedProperty).onChange(async (value) => {
         this.plugin.settings.lockedProperty = value.trim() || "locked";
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian10.Setting(containerEl).setName("Calendar markers").setHeading();
+    new import_obsidian11.Setting(containerEl).setName("Calendar markers").setHeading();
     const markers = this.plugin.settings.markers;
     for (let i = 0; i < markers.length; i++) {
       const marker = markers[i];
       const desc = marker.date ? marker.date : `${marker.start || "?"} \u2192 ${marker.end || "?"}`;
-      const s = new import_obsidian10.Setting(containerEl);
+      const s = new import_obsidian11.Setting(containerEl);
       s.setName(marker.label || "Untitled marker");
       s.setDesc(desc);
       s.addToggle(
@@ -8843,14 +9213,14 @@ var SabidurianSettingTab = class extends import_obsidian10.PluginSettingTab {
         })
       );
     }
-    new import_obsidian10.Setting(containerEl).addButton(
+    new import_obsidian11.Setting(containerEl).addButton(
       (btn) => btn.setButtonText("Add marker").setCta().onClick(() => {
         new MarkerModal(this.app, this.plugin, null, -1).open();
       })
     );
   }
 };
-var MarkerModal = class extends import_obsidian10.Modal {
+var MarkerModal = class extends import_obsidian11.Modal {
   constructor(app, plugin, marker, index) {
     super(app);
     this.label = "";
@@ -8880,12 +9250,12 @@ var MarkerModal = class extends import_obsidian10.Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("h3", { text: this.marker ? "Edit Marker" : "Add Marker" });
-    new import_obsidian10.Setting(contentEl).setName("Label").addText(
+    new import_obsidian11.Setting(contentEl).setName("Label").addText(
       (t) => t.setValue(this.label).setPlaceholder("Sprint 5").onChange((v) => {
         this.label = v;
       })
     );
-    new import_obsidian10.Setting(contentEl).setName("Type").addDropdown(
+    new import_obsidian11.Setting(contentEl).setName("Type").addDropdown(
       (d) => d.addOption("line", "Vertical line (single date)").addOption("band", "Shaded band (date range)").setValue(this.markerType).onChange((v) => {
         this.markerType = v;
         this.renderDateFields(contentEl);
@@ -8893,7 +9263,7 @@ var MarkerModal = class extends import_obsidian10.Modal {
     );
     const dateContainer = contentEl.createDiv({ cls: "sabidurian-marker-date-fields" });
     this.renderDateFields(contentEl);
-    new import_obsidian10.Setting(contentEl).setName("Color").addDropdown((d) => {
+    new import_obsidian11.Setting(contentEl).setName("Color").addDropdown((d) => {
       for (const [name, val] of Object.entries(MARKER_COLORS)) {
         d.addOption(val, name);
       }
@@ -8901,7 +9271,7 @@ var MarkerModal = class extends import_obsidian10.Modal {
         this.color = v;
       });
     });
-    new import_obsidian10.Setting(contentEl).addButton(
+    new import_obsidian11.Setting(contentEl).addButton(
       (btn) => btn.setButtonText("Save").setCta().onClick(async () => {
         var _a, _b, _c;
         const newMarker = {
@@ -8919,7 +9289,7 @@ var MarkerModal = class extends import_obsidian10.Modal {
         if (this.marker && this.index >= 0) {
           const matches = this.plugin.settings.markers.filter((value) => value.id === this.marker.id);
           if (!this.marker.id || matches.length !== 1 || JSON.stringify(matches[0]) !== this.original) {
-            new import_obsidian10.Notice("This marker changed. Reopen it before saving.");
+            new import_obsidian11.Notice("This marker changed. Reopen it before saving.");
             return;
           }
           this.plugin.settings.markers[this.plugin.settings.markers.indexOf(matches[0])] = newMarker;
@@ -8938,7 +9308,7 @@ var MarkerModal = class extends import_obsidian10.Modal {
   renderDateFields(contentEl) {
     contentEl.querySelectorAll(".sabidurian-marker-date-field").forEach((el) => el.remove());
     if (this.markerType === "line") {
-      const s = new import_obsidian10.Setting(contentEl);
+      const s = new import_obsidian11.Setting(contentEl);
       s.settingEl.classList.add("sabidurian-marker-date-field");
       s.setName("Date").setDesc("e.g. 2025-07-01, -500, 1066");
       s.addText(
@@ -8947,7 +9317,7 @@ var MarkerModal = class extends import_obsidian10.Modal {
         })
       );
     } else {
-      const s1 = new import_obsidian10.Setting(contentEl);
+      const s1 = new import_obsidian11.Setting(contentEl);
       s1.settingEl.classList.add("sabidurian-marker-date-field");
       s1.setName("Start date");
       s1.addText(
@@ -8955,7 +9325,7 @@ var MarkerModal = class extends import_obsidian10.Modal {
           this.start = v;
         })
       );
-      const s2 = new import_obsidian10.Setting(contentEl);
+      const s2 = new import_obsidian11.Setting(contentEl);
       s2.settingEl.classList.add("sabidurian-marker-date-field");
       s2.setName("End date");
       s2.addText(
@@ -9073,15 +9443,39 @@ var NativeTableColors = class {
 // src/main.ts
 var SABIDURIAN_VIEW_TYPE = "sabidurian-timeline";
 var SEQUENCE_VIEW_TYPE = "sabidurian-sequence";
-var SabidurianPlugin = class extends import_obsidian11.Plugin {
+var SabidurianPlugin = class extends import_obsidian12.Plugin {
   constructor() {
     super(...arguments);
+    this.updaterBlockedStartup = false;
     this.collaboration = new CollaborationBridge();
     this.colorSubscribers = /* @__PURE__ */ new Set();
     this.tableColors = /* @__PURE__ */ new Map();
     this.settings = { ...DEFAULT_SETTINGS };
   }
   async onload() {
+    this.updater = new PluginUpdater(
+      new UpdateFiles(this.app.vault.adapter, this.manifest.dir || (0, import_obsidian12.normalizePath)(`${this.app.vault.configDir}/plugins/${this.manifest.id}`)),
+      this.manifest.version,
+      async (url) => {
+        const response = await (0, import_obsidian12.requestUrl)({ url, throw: false, headers: {
+          Accept: url.startsWith("https://api.github.com/") ? "application/vnd.github+json" : "application/octet-stream"
+        } });
+        return { status: response.status, arrayBuffer: response.arrayBuffer };
+      },
+      import_obsidian12.requireApiVersion,
+      import_obsidian12.Platform.isMobile,
+      (message) => {
+        new import_obsidian12.Notice(message, 1e4);
+      }
+    );
+    this.register(() => {
+      var _a;
+      return (_a = this.updater) == null ? void 0 : _a.dispose();
+    });
+    this.updaterBlockedStartup = !await this.updater.initialize();
+    this.addSettingTab(new SabidurianSettingTab(this.app, this));
+    if (this.updaterBlockedStartup) return;
+    this.updater.start();
     await this.loadSettings();
     this.history = new EditHistory((file, mutate) => this.app.fileManager.processFrontMatter(file, mutate));
     this.registerEvent(this.app.workspace.on("time-and-line:collaboration-request", (receive) => {
@@ -9100,7 +9494,6 @@ var SabidurianPlugin = class extends import_obsidian11.Plugin {
       factory: (controller, containerEl) => new SequenceView(controller, containerEl, this),
       options: getSequenceViewOptions
     });
-    this.addSettingTab(new SabidurianSettingTab(this.app, this));
     const connectColors = (doc) => {
       if (!this.tableColors.has(doc)) this.tableColors.set(doc, new NativeTableColors(
         doc.body,

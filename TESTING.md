@@ -57,3 +57,14 @@ Landscape Safari with the keyboard open left very little viewport height. Reliab
 The full Obsidian iOS app has not been tested. Simulator Safari does not validate native plugin loading, Bases integration, vault persistence, background/resume, sync, or physical-device performance. Those require native Obsidian testing.
 
 Native table decoration depends on Obsidian 1.13.7 markup. Unsupported markup should lose decoration without replacing editors. Undo is session-only. The civil-time axis cannot visually distinguish the two repeated wall-clock hours at a DST fallback; explicit offsets are required for exact edits. Legacy Sequence/historical features have basic regression coverage, not the same depth of manual checks as precise scheduling.
+
+## Built-in updater 1.0.1
+
+Adapted the Team Relay updater for this fork and plugin ID. Numeric versioning
+starts at 1.0.1; thanksgiving builds need one manual bootstrap. Tests cover
+release allowlisting, explicit installation, automatic-check preferences,
+checksums, host/mobile compatibility, settings preservation, write-failure
+restoration, interrupted publication, and later manual installations.
+The Mac was locked during release work, so native Obsidian UI verification could
+not run. Automated settings UI, source types, full tests and packaging are the
+release checks; physical mobile acceptance is not claimed.

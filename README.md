@@ -345,36 +345,24 @@ The following features are planned but not yet implemented:
 ---
 
 
-## Installation (Beta)
+## Install and update this planning fork
 
-This plugin is currently in beta and not yet available in the Obsidian Community Plugin Browser.
+Download [Time & Line 1.0.1](https://github.com/kjgoodrick/obsidian-time-and-line-planning/releases/tag/1.0.1).
+For the one-time upgrade from a thanksgiving preview, quit Obsidian and replace
+only `main.js`, `manifest.json`, and `styles.css` in
+`.obsidian/plugins/timeline-gantt-view/`. **Preserve `data.json`** and your notes.
+Restart Obsidian. The ZIP contains a `timeline-gantt-view` folder; copy the files
+into the existing folder rather than nesting or replacing your whole settings folder.
 
-To install via [BRAT](https://github.com/TfTHacker/obsidian42-brat):
+From 1.0.1 onward, use **Settings → Time & Line (Planning) → Plugin updates**.
+Automatic checks are on by default and run daily. You choose when to install;
+save edits and restart Obsidian after the updater finishes. It checks only this
+planning fork's numeric GitHub releases (including previews), verifies SHA-256
+checksums, and preserves settings. Team Relay's updater does not update Time & Line.
+Do not point another updater at the upstream repository for this installation.
 
-1. Install the BRAT plugin from Obsidian's Community Plugins browser
-   (Settings → Community Plugins → Browse → search "BRAT").
-2. Enable BRAT in your Community Plugins list.
-3. Open the command palette (Cmd/Ctrl + P) and run:
-   **BRAT: Add a beta plugin for testing**
-4. Paste this repository URL: `https://github.com/sabidurian/timeline-gantt-view`
-5. Click **Add Plugin**.
-6. Enable the plugin in Settings → Community Plugins.
-
-### Updating
-
-BRAT checks for updates automatically. You can also manually check:
-- Open BRAT settings and click the refresh icon next to the plugin name, or
-- Run the command **BRAT: Check for updates to all beta plugins and themes**.
-
-### Reporting Issues
-
-Please report bugs and feedback via
-[GitHub Issues](https://github.com/sabidurian/timeline-gantt-view/issues).
-Include your Obsidian version, OS, and steps to reproduce.
-
-### ⚠️ Beta Notice
-
-This plugin is under active development. Back up your vault before installing.
-Beta plugins may cause unexpected behavior. If you encounter problems,
-you can remove the plugin by clicking the X next to it in BRAT's settings,
-or by disabling it in Community Plugins.
+Runtime backups and the update journal live in `.timeline-update` inside the
+plugin folder. Recoverable interrupted writes restore the previous runtime;
+restart if prompted. The updater does not send notes, settings, or account tokens
+to GitHub. An unreadable or damaged journal stops plugin startup for recovery.
+See [TESTING.md](TESTING.md) for validation limits.

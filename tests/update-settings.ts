@@ -1,0 +1,20 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {Window} from 'happy-dom';
+import {renderPluginUpdates} from '../src/updates/UpdateSettings';
+test('settings controls check, toggle and explicitly install; cleanup stops updates',()=>{
+ const win=new Window();Object.assign(globalThis,{document:win.document});
+ const p=win.HTMLElement.prototype as any;p.empty=function(){this.replaceChildren();};p.createEl=function(tag:string,opts:any){const e=win.document.createElement(tag);e.textContent=opts.text;if(opts.href)e.setAttribute('href',opts.href);this.append(e);return e;};
+ const el=win.document.createElement('div');let listener:any,checks=0,installs=0,auto=true;
+ const state:any={currentVersion:'1.0.1',automatic:true,busy:false,message:'Ready'};
+ const updater:any={subscribe(fn:any){listener=fn;fn(state);return()=>{listener=undefined;};},check(){checks++;},install(){installs++;},setAutomatic(v:boolean){auto=v;}};
+ const stop=renderPluginUpdates(el as any,updater);
+ const button=(text:string)=>[...el.querySelectorAll('button')].find(e=>e.textContent===text)!;
+ button('Check for updates').click();assert.equal(checks,1);assert.equal(installs,0);
+ const toggle=el.querySelector('input')!;toggle.checked=false;toggle.dispatchEvent(new win.Event('change'));assert.equal(auto,false);
+ listener({...state,release:{version:'1.0.2',prerelease:true,url:'https://github.com/kjgoodrick/obsidian-time-and-line-planning/releases/tag/1.0.2'}});
+ assert.match(el.textContent!,/Update to 1.0.2/);button('Update to 1.0.2').click();assert.equal(installs,1);
+ listener({...state,busy:true});assert.equal(button('Check for updates').disabled,true);
+ listener({...state,installedVersion:'1.0.2',message:'Installed. Restart Obsidian.'});assert.match(el.textContent!,/Restart Obsidian/);assert.equal(button('Check for updates').disabled,true);
+ stop();assert.equal(listener,undefined);
+});

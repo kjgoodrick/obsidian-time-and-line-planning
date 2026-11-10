@@ -1,5 +1,7 @@
 import { EditHistory } from './model/EditHistory';
-import { Plugin } from 'obsidian';
+import { Plugin, Notice, Platform, normalizePath, requestUrl, requireApiVersion } from 'obsidian';
+import { PluginUpdater } from './updates/PluginUpdater';
+import { UpdateFiles } from './updates/UpdateFiles';
 import { SabidurianView } from './SabidurianView';
 import { SequenceView } from './SequenceView';
 import { getViewOptions } from './viewOptions';
@@ -14,6 +16,8 @@ const SABIDURIAN_VIEW_TYPE = 'sabidurian-timeline';
 const SEQUENCE_VIEW_TYPE = 'sabidurian-sequence';
 
 export default class SabidurianPlugin extends Plugin {
+  updater?: PluginUpdater;
+  updaterBlockedStartup = false;
   readonly collaboration = new CollaborationBridge();
   colorSubscribers = new Set<() => void>();
   private tableColors = new Map<Document, NativeTableColors>();
@@ -21,6 +25,21 @@ export default class SabidurianPlugin extends Plugin {
   settings: SabidurianSettings = { ...DEFAULT_SETTINGS };
 
   async onload(): Promise<void> {
+    this.updater = new PluginUpdater(
+      new UpdateFiles(this.app.vault.adapter, this.manifest.dir || normalizePath(`${this.app.vault.configDir}/plugins/${this.manifest.id}`)),
+      this.manifest.version,
+      async url => {
+        const response = await requestUrl({url, throw: false, headers: {
+          Accept: url.startsWith('https://api.github.com/') ? 'application/vnd.github+json' : 'application/octet-stream',
+        }});
+        return {status: response.status, arrayBuffer: response.arrayBuffer};
+      }, requireApiVersion, Platform.isMobile, message => { new Notice(message, 10000); },
+    );
+    this.register(() => this.updater?.dispose());
+    this.updaterBlockedStartup = !await this.updater.initialize();
+    this.addSettingTab(new SabidurianSettingTab(this.app, this));
+    if (this.updaterBlockedStartup) return;
+    this.updater.start();
     await this.loadSettings();
     this.history = new EditHistory((file, mutate) => this.app.fileManager.processFrontMatter(file, mutate));
     this.registerEvent(this.app.workspace.on('time-and-line:collaboration-request', (receive: unknown) => {
@@ -46,7 +65,6 @@ export default class SabidurianPlugin extends Plugin {
       options: getSequenceViewOptions,
     });
 
-    this.addSettingTab(new SabidurianSettingTab(this.app, this));
     const connectColors = (doc: Document) => {
       if (!this.tableColors.has(doc)) this.tableColors.set(doc, new NativeTableColors(doc.body,
         (property, value) => getPropertyTone(property, value, this.settings.propertyColors)));

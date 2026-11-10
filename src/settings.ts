@@ -1,3 +1,4 @@
+import { renderPluginUpdates } from './updates/UpdateSettings';
 /**
  * Sabidurian Timeline — Plugin Settings Tab
  *
@@ -70,18 +71,32 @@ const MARKER_COLORS: Record<string, string> = {
 };
 
 export class SabidurianSettingTab extends PluginSettingTab {
-  private plugin: Plugin & { settings: SabidurianSettings; saveSettings: () => Promise<void> };
+  private unsubscribeUpdates?: () => void;
+  private plugin: Plugin & { settings: SabidurianSettings; saveSettings: () => Promise<void>; updater?: import('./updates/PluginUpdater').PluginUpdater; updaterBlockedStartup?: boolean };
 
-  constructor(app: App, plugin: Plugin & { settings: SabidurianSettings; saveSettings: () => Promise<void> }) {
+  constructor(app: App, plugin: Plugin & { settings: SabidurianSettings; saveSettings: () => Promise<void>; updater?: import('./updates/PluginUpdater').PluginUpdater; updaterBlockedStartup?: boolean }) {
     super(app, plugin);
     this.plugin = plugin;
   }
 
+  hide(): void {
+    this.unsubscribeUpdates?.();
+    this.unsubscribeUpdates = undefined;
+  }
+
   display(): void {
+    this.unsubscribeUpdates?.();
     const { containerEl } = this;
     containerEl.empty();
 
     containerEl.createEl('h2', { text: 'Time & Line' });
+    const updater = this.plugin.updater;
+    if (updater) {
+      const updates = containerEl.createDiv();
+      this.unsubscribeUpdates = renderPluginUpdates(updates, updater);
+    }
+
+    if (this.plugin.updaterBlockedStartup) return;
 
     new Setting(containerEl)
       .setName('Week starts on')
